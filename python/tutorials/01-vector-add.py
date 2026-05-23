@@ -18,12 +18,16 @@ In doing so, you will learn about:
 # Compute Kernel
 # --------------
 
+import os
+
 import torch
 
 import triton
 import triton.language as tl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
+DEBUG_STAGE_ENV = "1"
+SKIP_BENCHMARK_ENV = "TRITON_VECTOR_ADD_SKIP_BENCHMARK"
 
 
 @triton.jit
@@ -59,15 +63,31 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
 # and (2) enqueue the above kernel with appropriate grid/block sizes:
 
 
-def add(x: torch.Tensor, y: torch.Tensor):
-    # We need to preallocate the output.
+def _prepare_add_launch(x: torch.Tensor, y: torch.Tensor):
     output = torch.empty_like(x)
     assert x.device == DEVICE and y.device == DEVICE and output.device == DEVICE
     n_elements = output.numel()
-    # The SPMD launch grid denotes the number of kernel instances that run in parallel.
-    # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
-    # In this case, we use a 1D grid where the size is the number of blocks:
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
+    return output, n_elements, grid
+
+
+def compile_add_kernel(x: torch.Tensor, y: torch.Tensor, block_size: int = 1024):
+    output, n_elements, grid = _prepare_add_launch(x, y)
+    return add_kernel.warmup(x, y, output, n_elements, BLOCK_SIZE=block_size, grid=grid)
+
+
+def print_add_kernel_ir(compiled_kernel, stage: str):
+    stage = stage.lower()
+    if stage not in compiled_kernel.asm:
+        available = ", ".join(sorted(compiled_kernel.asm))
+        raise ValueError(f"Unknown stage {stage!r}. Available stages: {available}")
+    print(f"\n=== add_kernel {stage} ===")
+    print(compiled_kernel.asm[stage])
+
+
+def add(x: torch.Tensor, y: torch.Tensor):
+    # We need to preallocate the output.
+    output, n_elements, grid = _prepare_add_launch(x, y)
     # NOTE:
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
@@ -81,16 +101,22 @@ def add(x: torch.Tensor, y: torch.Tensor):
 # %%
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
 
-torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device=DEVICE)
-y = torch.rand(size, device=DEVICE)
-output_torch = x + y
-output_triton = add(x, y)
-print(output_torch)
-print(output_triton)
-print(f'The maximum difference between torch and triton is '
-      f'{torch.max(torch.abs(output_torch - output_triton))}')
+
+def run_demo():
+    torch.manual_seed(0)
+    size = 98432
+    x = torch.rand(size, device=DEVICE)
+    y = torch.rand(size, device=DEVICE)
+    # if debug_stage := os.environ.get(DEBUG_STAGE_ENV):
+    compiled = compile_add_kernel(x, y)
+    print_add_kernel_ir(compiled, "ttir")
+    output_torch = x + y
+    output_triton = add(x, y)
+    print(output_torch)
+    print(output_triton)
+    print(f'The maximum difference between torch and triton is '
+          f'{torch.max(torch.abs(output_torch - output_triton))}')
+
 
 # %%
 # Seems like we're good to go!
@@ -132,4 +158,14 @@ def benchmark(size, provider):
 # %%
 # We can now run the decorated function above. Pass `print_data=True` to see the performance number, `show_plots=True` to plot them, and/or
 # `save_path='/path/to/results/' to save them to disk along with raw CSV data:
-benchmark.run(print_data=True, show_plots=True)
+
+
+def main():
+    run_demo()
+    if os.environ.get(SKIP_BENCHMARK_ENV) == "1":
+        return
+    benchmark.run(print_data=True, show_plots=True)
+
+
+if __name__ == "__main__":
+    main()
