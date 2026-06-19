@@ -130,7 +130,7 @@ def _build_enzyme_module(ttir: str, entry_name: str, signature: Sequence[str], s
     stablehlo_types = [_stablehlo_type(ty, ttir, spec.tensor_shape) for ty in signature]
     pointer_arg_indices = [idx for idx, ty in enumerate(signature) if _is_pointer_signature_type(ty)]
     if not pointer_arg_indices:
-        raise RuntimeError("@fwddiff expected at least one pointer argument to model Triton memory results")
+        raise RuntimeError("fwddiff expected at least one pointer argument to model Triton memory results")
 
     ret_activities = [spec.arg_activities[idx] for idx in pointer_arg_indices]
     arg_activities = ",".join(spec.arg_activities)
@@ -247,7 +247,7 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
         parsed = ir.parse_mlir_module(out_path, mod.context)
         parsed.context = mod.context
         if not parsed.verify():
-            raise RuntimeError("@fwddiff produced invalid TTIR")
+            raise RuntimeError("fwddiff produced invalid TTIR")
         return parsed
     finally:
         if not spec.keep_temps:
@@ -316,7 +316,7 @@ def _flatten_arg(arg: Any, configured_activity: str | None) -> tuple[Any, tuple[
         raise TypeError("Active Triton autodiff arguments must be wrapped as triton.Duplicated(primal, tangent)")
 
     if hasattr(arg, "data_ptr") and hasattr(arg, "dtype"):
-        raise TypeError("Tensor arguments to @fwddiff must be wrapped as triton.Duplicated(primal, tangent)")
+        raise TypeError("Tensor arguments to triton.fwddiff must be wrapped as triton.Duplicated(primal, tangent)")
     return arg, (arg, ), "enzyme_const"
 
 

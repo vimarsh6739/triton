@@ -62,7 +62,7 @@ local Enzyme-JAX checkout paths used by the development environment. Set
 ``TRITON_ENZYME_OPT`` to point at the optimizer binary if it lives elsewhere.
 
 When Triton cannot infer the tensor shape used by Enzyme's wrapper module, pass
-``tensor_shape`` to the decorator:
+``tensor_shape`` to the ``fwddiff`` adapter:
 
 .. code-block:: python
 
