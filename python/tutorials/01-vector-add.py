@@ -26,10 +26,10 @@ import triton
 import triton.language as tl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
-DEBUG_STAGE_ENV = "1"
 SKIP_BENCHMARK_ENV = "TRITON_VECTOR_ADD_SKIP_BENCHMARK"
 
 
+@triton.fwddiff
 @triton.jit
 def add_kernel(x_ptr,  # *Pointer* to first input vector.
                y_ptr,  # *Pointer* to second input vector.
@@ -54,7 +54,7 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
-    # Write x + y back to DRAM.
+    # Write x + y back to DRAM. @fwddiff asks Enzyme to generate the tangent store.
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
@@ -73,7 +73,17 @@ def _prepare_add_launch(x: torch.Tensor, y: torch.Tensor):
 
 def compile_add_kernel(x: torch.Tensor, y: torch.Tensor, block_size: int = 1024):
     output, n_elements, grid = _prepare_add_launch(x, y)
-    return add_kernel.warmup(x, y, output, n_elements, BLOCK_SIZE=block_size, grid=grid)
+    dx = torch.empty_like(x)
+    dy = torch.empty_like(y)
+    doutput = torch.empty_like(output)
+    return add_kernel.warmup(
+        triton.Duplicated(x, dx),
+        triton.Duplicated(y, dy),
+        triton.Duplicated(output, doutput),
+        triton.Const(n_elements),
+        BLOCK_SIZE=block_size,
+        grid=grid,
+    )
 
 
 def print_add_kernel_ir(compiled_kernel, stage: str):
@@ -85,6 +95,12 @@ def print_add_kernel_ir(compiled_kernel, stage: str):
     print(compiled_kernel.asm[stage])
 
 
+def assert_fwddiff_ir(compiled_kernel):
+    ttir = compiled_kernel.asm["ttir"]
+    if "fwddiffeadd_kernel" not in ttir or "arith.addf" not in ttir or ttir.count("tt.store") < 2:
+        raise AssertionError("@fwddiff did not produce the expected differentiated TTIR")
+
+
 def add(x: torch.Tensor, y: torch.Tensor):
     # We need to preallocate the output.
     output, n_elements, grid = _prepare_add_launch(x, y)
@@ -92,10 +108,24 @@ def add(x: torch.Tensor, y: torch.Tensor):
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    add_kernel.primal[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
     return output
+
+
+def add_forward_diff(x: torch.Tensor, dx: torch.Tensor, y: torch.Tensor, dy: torch.Tensor):
+    output, n_elements, grid = _prepare_add_launch(x, y)
+    doutput = torch.empty_like(output)
+    assert dx.device == DEVICE and dy.device == DEVICE and doutput.device == DEVICE
+    add_kernel[grid](
+        triton.Duplicated(x, dx),
+        triton.Duplicated(y, dy),
+        triton.Duplicated(output, doutput),
+        triton.Const(n_elements),
+        BLOCK_SIZE=1024,
+    )
+    return output, doutput
 
 
 # %%
@@ -107,15 +137,27 @@ def run_demo():
     size = 98432
     x = torch.rand(size, device=DEVICE)
     y = torch.rand(size, device=DEVICE)
-    # if debug_stage := os.environ.get(DEBUG_STAGE_ENV):
+    dx = torch.full_like(x, 2.0)
+    dy = torch.full_like(y, 3.0)
+
     compiled = compile_add_kernel(x, y)
+    assert_fwddiff_ir(compiled)
     print_add_kernel_ir(compiled, "ttir")
+
     output_torch = x + y
+    doutput_torch = dx + dy
     output_triton = add(x, y)
+    output_diff_triton, doutput_triton = add_forward_diff(x, dx, y, dy)
+    torch.testing.assert_close(output_triton, output_torch)
+    torch.testing.assert_close(output_diff_triton, output_torch)
+    torch.testing.assert_close(doutput_triton, doutput_torch)
     print(output_torch)
-    print(output_triton)
-    print(f'The maximum difference between torch and triton is '
-          f'{torch.max(torch.abs(output_torch - output_triton))}')
+    print(output_diff_triton)
+    print(doutput_triton)
+    print(f'The maximum primal difference between torch and triton is '
+          f'{torch.max(torch.abs(output_torch - output_diff_triton))}')
+    print(f'The maximum tangent difference between torch and triton is '
+          f'{torch.max(torch.abs(doutput_torch - doutput_triton))}')
 
 
 # %%
