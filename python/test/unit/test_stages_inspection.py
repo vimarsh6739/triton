@@ -1,10 +1,21 @@
 import triton
+import triton.language as tl
 
 import os
 import pathlib
 import hashlib
 import pytest
+import torch
 from triton._internal_testing import is_cuda
+from triton.autodiff import _find_enzyme_opt
+
+
+def _has_enzyme_opt():
+    try:
+        _find_enzyme_opt()
+    except RuntimeError:
+        return False
+    return True
 
 
 @pytest.mark.skipif(not is_cuda(), reason="only currently tested on CUDA")
@@ -62,3 +73,50 @@ def test_inspection(monkeypatch, fresh_knobs, tmp_path: pathlib.Path):
 
     # Check that repros match
     assert golden_repro.replace('k1', 'dummy') == hook_repro.replace('k2', 'dummy')
+
+
+@pytest.mark.skipif(not is_cuda(), reason="only currently tested on CUDA")
+@pytest.mark.skipif(not _has_enzyme_opt(), reason="enzymexlamlir-opt is required for Triton fwddiff")
+def test_fwddiff_vector_add(fresh_triton_cache):
+    device = triton.runtime.driver.active.get_active_torch_device()
+
+    @triton.fwddiff
+    @triton.jit
+    def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+        pid = tl.program_id(axis=0)
+        offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        mask = offsets < n_elements
+        x = tl.load(x_ptr + offsets, mask=mask)
+        y = tl.load(y_ptr + offsets, mask=mask)
+        tl.store(output_ptr + offsets, x + y, mask=mask)
+
+    n_elements = 1024
+    x = torch.rand(n_elements, device=device)
+    y = torch.rand(n_elements, device=device)
+    dx = torch.full_like(x, 2.0)
+    dy = torch.full_like(y, 3.0)
+    output = torch.empty_like(x)
+    doutput = torch.empty_like(output)
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
+
+    compiled = add_kernel.warmup(
+        triton.Duplicated(x, dx),
+        triton.Duplicated(y, dy),
+        triton.Duplicated(output, doutput),
+        triton.Const(n_elements),
+        BLOCK_SIZE=1024,
+        grid=grid,
+    )
+    assert "fwddiffeadd_kernel" in compiled.asm["ttir"]
+    assert compiled.asm["ttir"].count("tt.store") == 2
+
+    add_kernel[grid](
+        triton.Duplicated(x, dx),
+        triton.Duplicated(y, dy),
+        triton.Duplicated(output, doutput),
+        triton.Const(n_elements),
+        BLOCK_SIZE=1024,
+    )
+
+    torch.testing.assert_close(output, x + y)
+    torch.testing.assert_close(doutput, dx + dy)

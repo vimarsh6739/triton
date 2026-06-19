@@ -23,6 +23,7 @@ Triton API
 ----------
 
 - :doc:`triton <python-api/triton>`
+- :doc:`triton.autodiff <python-api/triton.autodiff>`
 - :doc:`triton.language <python-api/triton.language>`
 - :doc:`triton.testing <python-api/triton.testing>`
 - :doc:`Triton semantics <python-api/triton-semantics>`
@@ -35,6 +36,7 @@ Triton API
    :hidden:
 
    python-api/triton
+   python-api/triton.autodiff
    python-api/triton.language
    python-api/triton.testing
    python-api/triton-semantics
