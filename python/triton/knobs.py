@@ -10,7 +10,7 @@ import pathlib
 
 from dataclasses import dataclass
 from contextlib import contextmanager
-from typing import cast, Any, Callable, Generator, Generic, Optional, Protocol, Type, TypeVar, TypedDict, TYPE_CHECKING, Union
+from typing import cast, Any, Callable, Generator, Generic, Optional, overload, Protocol, Type, TypeVar, TypedDict, TYPE_CHECKING, Union
 
 from triton._C.libtriton import getenv, getenv_bool  # type: ignore
 
@@ -203,11 +203,11 @@ class env_nvidia_tool(env_base[str, NvidiaTool]):
     def get(self) -> NvidiaTool:
         return self.transform(getenv(self.key))
 
-    def transform(self, path: str) -> NvidiaTool:
+    def transform(self, val: str) -> NvidiaTool:
         # We still add default as fallback in case the pointed binary isn't
         # accessible.
-        if path is not None:
-            paths = [path, self.default_path]
+        if val is not None:
+            paths = [val, self.default_path]
         else:
             paths = [self.default_path]
 
@@ -295,9 +295,9 @@ class base_knobs:
 
     @contextmanager
     def scope(self) -> Generator[None, None, None]:
+        initial_env = {knob.key: getenv(knob.key) for knob in self.knob_descriptors.values()}
+        orig = dict(self.__dict__)
         try:
-            initial_env = {knob.key: getenv(knob.key) for knob in self.knob_descriptors.values()}
-            orig = dict(self.__dict__)
             yield
         finally:
             self.__dict__.clear()
@@ -462,9 +462,20 @@ class JITHook(Protocol):
         ...
 
 
+PipelineStage = Callable[..., Any]
+PipelineStages = dict[str, PipelineStage]
+PipelineStagesCacheKey = tuple[str, str]
+
+
 class PipelineStagesHook(Protocol):
 
-    def __call__(self, stages, options, language, capability):
+    @overload
+    def __call__(self, /) -> PipelineStagesCacheKey:
+        ...
+
+    @overload
+    def __call__(self, backend: object, stages: PipelineStages, options: Any, language: Any, capability: Any,
+                 /) -> PipelineStagesCacheKey | None:
         ...
 
 
