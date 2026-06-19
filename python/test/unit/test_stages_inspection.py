@@ -106,7 +106,6 @@ def test_inspection(monkeypatch, fresh_knobs, tmp_path: pathlib.Path):
 def test_fwddiff_vector_add(fresh_triton_cache):
     device = triton.runtime.driver.active.get_active_torch_device()
 
-    @triton.fwddiff
     @triton.jit
     def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(axis=0)
@@ -125,7 +124,7 @@ def test_fwddiff_vector_add(fresh_triton_cache):
     doutput = torch.empty_like(output)
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
 
-    compiled = add_kernel.warmup(
+    compiled = triton.fwddiff(add_kernel).warmup(
         triton.Duplicated(x, dx),
         triton.Duplicated(y, dy),
         triton.Duplicated(output, doutput),
@@ -136,7 +135,7 @@ def test_fwddiff_vector_add(fresh_triton_cache):
     assert "fwddiffeadd_kernel" in compiled.asm["ttir"]
     assert compiled.asm["ttir"].count("tt.store") == 2
 
-    add_kernel[grid](
+    triton.fwddiff(add_kernel)[grid](
         triton.Duplicated(x, dx),
         triton.Duplicated(y, dy),
         triton.Duplicated(output, doutput),

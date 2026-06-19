@@ -29,7 +29,6 @@ DEVICE = triton.runtime.driver.active.get_active_torch_device()
 SKIP_BENCHMARK_ENV = "TRITON_VECTOR_ADD_SKIP_BENCHMARK"
 
 
-@triton.fwddiff
 @triton.jit
 def add_kernel(x_ptr,  # *Pointer* to first input vector.
                y_ptr,  # *Pointer* to second input vector.
@@ -54,7 +53,7 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
-    # Write x + y back to DRAM. @fwddiff asks Enzyme to generate the tangent store.
+    # Write x + y back to DRAM. triton.fwddiff(add_kernel) generates the tangent store.
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
@@ -76,7 +75,7 @@ def compile_add_kernel(x: torch.Tensor, y: torch.Tensor, block_size: int = 1024)
     dx = torch.empty_like(x)
     dy = torch.empty_like(y)
     doutput = torch.empty_like(output)
-    return add_kernel.warmup(
+    return triton.fwddiff(add_kernel).warmup(
         triton.Duplicated(x, dx),
         triton.Duplicated(y, dy),
         triton.Duplicated(output, doutput),
@@ -98,7 +97,7 @@ def print_add_kernel_ir(compiled_kernel, stage: str):
 def assert_fwddiff_ir(compiled_kernel):
     ttir = compiled_kernel.asm["ttir"]
     if "fwddiffeadd_kernel" not in ttir or "arith.addf" not in ttir or ttir.count("tt.store") < 2:
-        raise AssertionError("@fwddiff did not produce the expected differentiated TTIR")
+        raise AssertionError("triton.fwddiff(add_kernel) did not produce the expected differentiated TTIR")
 
 
 def add(x: torch.Tensor, y: torch.Tensor):
@@ -108,7 +107,7 @@ def add(x: torch.Tensor, y: torch.Tensor):
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
     #  - Don't forget to pass meta-parameters as keywords arguments.
-    add_kernel.primal[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
+    add_kernel[grid](x, y, output, n_elements, BLOCK_SIZE=1024)
     # We return a handle to z but, since `torch.cuda.synchronize()` hasn't been called, the kernel is still
     # running asynchronously at this point.
     return output
@@ -118,7 +117,7 @@ def add_forward_diff(x: torch.Tensor, dx: torch.Tensor, y: torch.Tensor, dy: tor
     output, n_elements, grid = _prepare_add_launch(x, y)
     doutput = torch.empty_like(output)
     assert dx.device == DEVICE and dy.device == DEVICE and doutput.device == DEVICE
-    add_kernel[grid](
+    triton.fwddiff(add_kernel)[grid](
         triton.Duplicated(x, dx),
         triton.Duplicated(y, dy),
         triton.Duplicated(output, doutput),
