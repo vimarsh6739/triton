@@ -8,6 +8,7 @@ import pytest
 import torch
 from triton._internal_testing import is_cuda
 from triton._instrumentation import instrument, is_enabled, register_instrumentation, unregister_instrumentation
+from triton.experimental.autodiff import Const, Duplicated, _find_enzyme_opt, fwddiff
 
 
 def test_instrumentation_mode():
@@ -33,7 +34,6 @@ def test_dynamic_instrumentation_and_dialect_loading():
         unregister_instrumentation(point="ttgpuir-to-llvmir", backend="test")
 
     assert not instrument("context", point="load-dialects", backend="test")
-from triton.autodiff import _find_enzyme_opt
 
 
 def _has_enzyme_opt():
@@ -42,6 +42,11 @@ def _has_enzyme_opt():
     except RuntimeError:
         return False
     return True
+
+
+def test_fwddiff_is_experimental_api():
+    assert not hasattr(triton, "fwddiff")
+    assert not hasattr(triton, "autodiff")
 
 
 @pytest.mark.skipif(not is_cuda(), reason="only currently tested on CUDA")
@@ -124,22 +129,22 @@ def test_fwddiff_vector_add(fresh_triton_cache):
     doutput = torch.empty_like(output)
     grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]), )
 
-    compiled = triton.fwddiff(add_kernel).warmup(
-        triton.Duplicated(x, dx),
-        triton.Duplicated(y, dy),
-        triton.Duplicated(output, doutput),
-        triton.Const(n_elements),
+    compiled = fwddiff(add_kernel).warmup(
+        Duplicated(x, dx),
+        Duplicated(y, dy),
+        Duplicated(output, doutput),
+        Const(n_elements),
         BLOCK_SIZE=1024,
         grid=grid,
     )
     assert "fwddiffeadd_kernel" in compiled.asm["ttir"]
     assert compiled.asm["ttir"].count("tt.store") == 2
 
-    triton.fwddiff(add_kernel)[grid](
-        triton.Duplicated(x, dx),
-        triton.Duplicated(y, dy),
-        triton.Duplicated(output, doutput),
-        triton.Const(n_elements),
+    fwddiff(add_kernel)[grid](
+        Duplicated(x, dx),
+        Duplicated(y, dy),
+        Duplicated(output, doutput),
+        Const(n_elements),
         BLOCK_SIZE=1024,
     )
 

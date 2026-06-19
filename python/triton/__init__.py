@@ -22,7 +22,6 @@ from .runtime._async_compile import AsyncCompileMode, FutureKernel
 from .compiler import compile, CompilationError
 from .errors import TritonError
 from .runtime._allocation import set_allocator
-from .autodiff import Const, Duplicated, autodiff, fwddiff
 
 from . import language
 from . import testing
@@ -34,16 +33,12 @@ aggregate = language.core._aggregate
 __all__ = [
     "AsyncCompileMode",
     "aggregate",
-    "autodiff",
     "autotune",
     "cdiv",
     "CompilationError",
     "compile",
     "Config",
-    "Const",
     "constexpr_function",
-    "Duplicated",
-    "fwddiff",
     "FutureKernel",
     "heuristics",
     "InterpreterError",
