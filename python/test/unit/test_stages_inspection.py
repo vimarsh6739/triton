@@ -86,13 +86,14 @@ def test_fwddiff_vector_add(fresh_triton_cache):
     device = triton.runtime.driver.active.get_active_torch_device()
 
     @triton.jit
-    def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    def add_kernel(x_ptr, y_ptr, output_ptr, stride, n_elements, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(axis=0)
         offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         mask = offsets < n_elements
-        x = tl.load(x_ptr + offsets, mask=mask)
-        y = tl.load(y_ptr + offsets, mask=mask)
-        tl.store(output_ptr + offsets, x + y, mask=mask)
+        strided_offsets = offsets * stride
+        x = tl.load(x_ptr + strided_offsets, mask=mask)
+        y = tl.load(y_ptr + strided_offsets, mask=mask)
+        tl.store(output_ptr + strided_offsets, x + y, mask=mask)
 
     n_elements = 1024
     x = torch.rand(n_elements, device=device)
@@ -107,7 +108,8 @@ def test_fwddiff_vector_add(fresh_triton_cache):
         Duplicated(x, dx),
         Duplicated(y, dy),
         Duplicated(output, doutput),
-        Const(n_elements),
+        Const(1),
+        n_elements=n_elements,
         BLOCK_SIZE=1024,
         grid=grid,
     )
@@ -118,7 +120,8 @@ def test_fwddiff_vector_add(fresh_triton_cache):
         Duplicated(x, dx),
         Duplicated(y, dy),
         Duplicated(output, doutput),
-        Const(n_elements),
+        Const(1),
+        n_elements=n_elements,
         BLOCK_SIZE=1024,
     )
 

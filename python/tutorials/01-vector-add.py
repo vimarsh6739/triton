@@ -18,15 +18,12 @@ In doing so, you will learn about:
 # Compute Kernel
 # --------------
 
-import os
-
 import torch
 
 import triton
 import triton.language as tl
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
-SKIP_BENCHMARK_ENV = "TRITON_VECTOR_ADD_SKIP_BENCHMARK"
 
 
 @triton.jit
@@ -53,7 +50,7 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
     x = tl.load(x_ptr + offsets, mask=mask)
     y = tl.load(y_ptr + offsets, mask=mask)
     output = x + y
-    # Write x + y back to DRAM. triton.fwddiff(add_kernel) generates the tangent store.
+    # Write x + y back to DRAM.
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
@@ -62,47 +59,15 @@ def add_kernel(x_ptr,  # *Pointer* to first input vector.
 # and (2) enqueue the above kernel with appropriate grid/block sizes:
 
 
-def _prepare_add_launch(x: torch.Tensor, y: torch.Tensor):
+def add(x: torch.Tensor, y: torch.Tensor):
+    # We need to preallocate the output.
     output = torch.empty_like(x)
     assert x.device == DEVICE and y.device == DEVICE and output.device == DEVICE
     n_elements = output.numel()
+    # The SPMD launch grid denotes the number of kernel instances that run in parallel.
+    # It is analogous to CUDA launch grids. It can be either Tuple[int], or Callable(metaparameters) -> Tuple[int].
+    # In this case, we use a 1D grid where the size is the number of blocks:
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']), )
-    return output, n_elements, grid
-
-
-def compile_add_kernel(x: torch.Tensor, y: torch.Tensor, block_size: int = 1024):
-    output, n_elements, grid = _prepare_add_launch(x, y)
-    dx = torch.empty_like(x)
-    dy = torch.empty_like(y)
-    doutput = torch.empty_like(output)
-    return triton.fwddiff(add_kernel).warmup(
-        triton.Duplicated(x, dx),
-        triton.Duplicated(y, dy),
-        triton.Duplicated(output, doutput),
-        triton.Const(n_elements),
-        BLOCK_SIZE=block_size,
-        grid=grid,
-    )
-
-
-def print_add_kernel_ir(compiled_kernel, stage: str):
-    stage = stage.lower()
-    if stage not in compiled_kernel.asm:
-        available = ", ".join(sorted(compiled_kernel.asm))
-        raise ValueError(f"Unknown stage {stage!r}. Available stages: {available}")
-    print(f"\n=== add_kernel {stage} ===")
-    print(compiled_kernel.asm[stage])
-
-
-def assert_fwddiff_ir(compiled_kernel):
-    ttir = compiled_kernel.asm["ttir"]
-    if "fwddiffeadd_kernel" not in ttir or "arith.addf" not in ttir or ttir.count("tt.store") < 2:
-        raise AssertionError("triton.fwddiff(add_kernel) did not produce the expected differentiated TTIR")
-
-
-def add(x: torch.Tensor, y: torch.Tensor):
-    # We need to preallocate the output.
-    output, n_elements, grid = _prepare_add_launch(x, y)
     # NOTE:
     #  - Each torch.tensor object is implicitly converted into a pointer to its first element.
     #  - `triton.jit`'ed functions can be indexed with a launch grid to obtain a callable GPU kernel.
@@ -113,51 +78,19 @@ def add(x: torch.Tensor, y: torch.Tensor):
     return output
 
 
-def add_forward_diff(x: torch.Tensor, dx: torch.Tensor, y: torch.Tensor, dy: torch.Tensor):
-    output, n_elements, grid = _prepare_add_launch(x, y)
-    doutput = torch.empty_like(output)
-    assert dx.device == DEVICE and dy.device == DEVICE and doutput.device == DEVICE
-    triton.fwddiff(add_kernel)[grid](
-        triton.Duplicated(x, dx),
-        triton.Duplicated(y, dy),
-        triton.Duplicated(output, doutput),
-        triton.Const(n_elements),
-        BLOCK_SIZE=1024,
-    )
-    return output, doutput
-
-
 # %%
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
 
-
-def run_demo():
-    torch.manual_seed(0)
-    size = 98432
-    x = torch.rand(size, device=DEVICE)
-    y = torch.rand(size, device=DEVICE)
-    dx = torch.full_like(x, 2.0)
-    dy = torch.full_like(y, 3.0)
-
-    compiled = compile_add_kernel(x, y)
-    assert_fwddiff_ir(compiled)
-    print_add_kernel_ir(compiled, "ttir")
-
-    output_torch = x + y
-    doutput_torch = dx + dy
-    output_triton = add(x, y)
-    output_diff_triton, doutput_triton = add_forward_diff(x, dx, y, dy)
-    torch.testing.assert_close(output_triton, output_torch)
-    torch.testing.assert_close(output_diff_triton, output_torch)
-    torch.testing.assert_close(doutput_triton, doutput_torch)
-    print(output_torch)
-    print(output_diff_triton)
-    print(doutput_triton)
-    print(f'The maximum primal difference between torch and triton is '
-          f'{torch.max(torch.abs(output_torch - output_diff_triton))}')
-    print(f'The maximum tangent difference between torch and triton is '
-          f'{torch.max(torch.abs(doutput_torch - doutput_triton))}')
-
+torch.manual_seed(0)
+size = 98432
+x = torch.rand(size, device=DEVICE)
+y = torch.rand(size, device=DEVICE)
+output_torch = x + y
+output_triton = add(x, y)
+print(output_torch)
+print(output_triton)
+print(f'The maximum difference between torch and triton is '
+      f'{torch.max(torch.abs(output_torch - output_triton))}')
 
 # %%
 # Seems like we're good to go!
@@ -199,14 +132,4 @@ def benchmark(size, provider):
 # %%
 # We can now run the decorated function above. Pass `print_data=True` to see the performance number, `show_plots=True` to plot them, and/or
 # `save_path='/path/to/results/' to save them to disk along with raw CSV data:
-
-
-def main():
-    run_demo()
-    if os.environ.get(SKIP_BENCHMARK_ENV) == "1":
-        return
-    benchmark.run(print_data=True, show_plots=True)
-
-
-if __name__ == "__main__":
-    main()
+benchmark.run(print_data=True, show_plots=True)
