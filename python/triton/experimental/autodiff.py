@@ -47,14 +47,18 @@ class Const:
 @dataclass(frozen=True)
 class _DiffSpec:
     mode: str
+    arg_names: tuple[str, ...]
     arg_activities: tuple[str, ...]
+    runtime_arg_names: tuple[str, ...]
     enzyme_opt: str
     tensor_shape: tuple[int, ...] | None
     keep_temps: bool
 
     @property
     def key_material(self) -> str:
-        return repr((self.mode, self.arg_activities, self.enzyme_opt, self.tensor_shape))
+        return repr(
+            (self.mode, self.arg_names, self.arg_activities, self.runtime_arg_names, self.enzyme_opt,
+             self.tensor_shape, self.keep_temps))
 
 
 def _normalize_mode(mode: str) -> str:
@@ -135,16 +139,26 @@ def _module_body(ttir: str) -> str:
     raise RuntimeError("Could not find the end of the top-level TTIR module")
 
 
-def _build_enzyme_module(ttir: str, entry_name: str, signature: Sequence[str], spec: _DiffSpec) -> tuple[str, str]:
+def _build_enzyme_module(
+    ttir: str,
+    entry_name: str,
+    signature: Sequence[str],
+    spec: _DiffSpec,
+    arg_activities: Sequence[str],
+) -> tuple[str, str]:
+    if len(arg_activities) != len(signature):
+        raise RuntimeError(
+            "Triton fwddiff activity/signature mismatch: "
+            f"got {len(arg_activities)} activities for {len(signature)} TTIR arguments")
     stablehlo_types = [_stablehlo_type(ty, ttir, spec.tensor_shape) for ty in signature]
     pointer_arg_indices = [idx for idx, ty in enumerate(signature) if _is_pointer_signature_type(ty)]
     if not pointer_arg_indices:
         raise RuntimeError("fwddiff expected at least one pointer argument to model Triton memory results")
 
-    ret_activities = [spec.arg_activities[idx] for idx in pointer_arg_indices]
-    arg_activities = ",".join(spec.arg_activities)
+    ret_activities = [arg_activities[idx] for idx in pointer_arg_indices]
+    arg_activity_text = ",".join(arg_activities)
     ret_activity_text = ",".join(ret_activities)
-    pass_arg = f"infn=main outfn= argTys={arg_activities} retTys={ret_activity_text} mode={spec.mode}"
+    pass_arg = f"infn=main outfn= argTys={arg_activity_text} retTys={ret_activity_text} mode={spec.mode}"
 
     args = ", ".join(f"%arg{idx}: {ty}" for idx, ty in enumerate(stablehlo_types))
     operands = ", ".join(f"%arg{idx}" for idx in range(len(signature)))
@@ -238,7 +252,12 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
     ttir = mod.str_nodebug()
     entry_name = mod.get_entry_func_name()
     signature = mod.get_function_signature(mod.get_function(entry_name))
-    wrapper, pass_arg = _build_enzyme_module(ttir, entry_name, signature, spec)
+    activity_by_name = dict(zip(spec.arg_names, spec.arg_activities))
+    try:
+        arg_activities = tuple(activity_by_name[name] for name in spec.runtime_arg_names)
+    except KeyError as exc:
+        raise RuntimeError(f"Missing Triton fwddiff activity for kernel argument {exc.args[0]!r}") from exc
+    wrapper, pass_arg = _build_enzyme_module(ttir, entry_name, signature, spec, arg_activities)
     wrapper_path = _write_temp_mlir(wrapper, spec.keep_temps, "triton-enzyme-in-")
     out_path = None
     try:
@@ -390,58 +409,98 @@ class _AutodiffKernel:
     def __getattr__(self, name):
         return getattr(self._kernel, name)
 
-    def _flatten_args(self, args: tuple[Any, ...]) -> tuple[list[Any], list[Any], tuple[str, ...]]:
+    def _flatten_args(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], dict[str, tuple[Any, ...]], tuple[str, ...],
+               tuple[str, ...]]:
         if self._configured_arg_activities is not None and len(self._configured_arg_activities) != len(args):
             raise TypeError(
                 f"Expected {len(self._configured_arg_activities)} runtime arguments for configured autodiff "
                 f"activities, got {len(args)}")
 
-        compile_args = []
-        launch_args = []
+        arg_names = tuple(self._kernel.arg_names)
+        kernel_arg_names = set(arg_names)
+        kernel_kwargs = {name: value for name, value in kwargs.items() if name in kernel_arg_names}
+        compile_kwargs = {name: value for name, value in kwargs.items() if name not in kernel_arg_names}
+        bound = self._kernel.signature.bind(*args, **kernel_kwargs)
+        bound.apply_defaults()
+
+        flat_args_by_name = {}
         activities = []
-        for idx, arg in enumerate(args):
-            configured = None if self._configured_arg_activities is None else self._configured_arg_activities[idx]
+        for idx, name in enumerate(arg_names):
+            arg = bound.arguments[name]
+            configured = None
+            if self._configured_arg_activities is not None and idx < len(args):
+                configured = self._configured_arg_activities[idx]
             compile_arg, flat_args, activity = _flatten_arg(arg, configured)
-            compile_args.append(compile_arg)
-            launch_args.extend(flat_args)
+            bound.arguments[name] = compile_arg
+            flat_args_by_name[name] = flat_args
             activities.append(activity)
-        return compile_args, launch_args, tuple(activities)
+        compile_kwargs.update(bound.kwargs)
+        primal_bound_args = dict(bound.arguments)
+        return bound.args, compile_kwargs, primal_bound_args, flat_args_by_name, arg_names, tuple(activities)
 
     @staticmethod
-    def _patch_launcher_signature(kernel, activities: tuple[str, ...]) -> None:
+    def _patch_launcher_signature(
+        kernel,
+        activity_by_name: dict[str, str],
+        expected_runtime_arg_names: tuple[str, ...],
+    ) -> tuple[str, ...]:
         primal_signature = getattr(kernel.src, "_triton_autodiff_primal_signature", None)
         if primal_signature is None:
             primal_signature = dict(kernel.src.signature)
             kernel.src._triton_autodiff_primal_signature = primal_signature
 
         expanded = []
-        for ty, activity in zip(primal_signature.values(), activities):
+        runtime_arg_names = []
+        for name, ty in primal_signature.items():
+            if ty == "constexpr":
+                continue
+            runtime_arg_names.append(name)
+            activity = activity_by_name[name]
             expanded.append(ty)
             if activity == "enzyme_dup":
                 expanded.append(ty)
+        runtime_arg_names = tuple(runtime_arg_names)
+        if runtime_arg_names != expected_runtime_arg_names:
+            raise RuntimeError(
+                "Triton fwddiff specialization mismatch between the JIT binder and compiled source: "
+                f"{expected_runtime_arg_names!r} != {runtime_arg_names!r}")
         kernel.src.signature = {idx: ty for idx, ty in enumerate(expanded)}
+        return runtime_arg_names
 
     def run(self, *args, grid, warmup, **kwargs):
         from ..runtime.driver import driver
 
-        compile_args, launch_args, activities = self._flatten_args(args)
+        compile_args, compile_kwargs, bound_args, flat_args_by_name, arg_names, activities = self._flatten_args(
+            args, kwargs)
+        device = driver.active.get_current_device()
+        # Reuse the same binder as JITFunction.run so arguments specialized to
+        # constexpr values are omitted from both Enzyme activities and launch arguments.
+        *_, binder = self._kernel.device_caches[device]
+        _, specialization, _ = binder(*compile_args, **compile_kwargs)
+        runtime_arg_names = tuple(
+            name for name, specialized in zip(arg_names, specialization) if specialized[0] != "constexpr")
         spec = _DiffSpec(
             mode=self._mode,
+            arg_names=arg_names,
             arg_activities=activities,
+            runtime_arg_names=runtime_arg_names,
             enzyme_opt=_find_enzyme_opt(self._enzyme_opt),
             tensor_shape=self._tensor_shape,
             keep_temps=self._keep_temps,
         )
 
         with _autodiff_pipeline(spec):
-            kernel = self._kernel.run(*compile_args, grid=grid, warmup=True, **kwargs)
-        self._patch_launcher_signature(kernel, activities)
+            kernel = self._kernel.run(*compile_args, grid=grid, warmup=True, **compile_kwargs)
+        activity_by_name = dict(zip(arg_names, activities))
+        runtime_arg_names = self._patch_launcher_signature(kernel, activity_by_name, runtime_arg_names)
 
         if warmup:
             return kernel
 
-        bound_args = {name: value for name, value in zip(self._kernel.arg_names, compile_args)}
-        bound_args.update(kwargs)
         if callable(grid):
             grid = grid(bound_args)
         grid = cast(Sequence[int], grid)
@@ -453,7 +512,10 @@ class _AutodiffKernel:
         active_driver = cast(Any, driver.active)
         device = active_driver.get_current_device()
         stream = active_driver.get_current_stream(device)
-        launch_metadata = kernel.launch_metadata(grid, stream, *compile_args)
+        launch_metadata = kernel.launch_metadata(grid, stream, *bound_args.values())
+        launch_args = []
+        for name in runtime_arg_names:
+            launch_args.extend(flat_args_by_name[name])
         kernel.run(grid_0, grid_1, grid_2, stream, kernel.function, kernel.packed_metadata, launch_metadata,
                    knobs.runtime.launch_enter_hook, knobs.runtime.launch_exit_hook, *launch_args)
         return kernel
@@ -485,4 +547,3 @@ def autodiff(kernel=None, *, mode: str = "forward", arg_activities: Iterable[str
 
 def fwddiff(kernel=None, **kwargs):
     return autodiff(kernel, mode="forward", **kwargs)
-
