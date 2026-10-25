@@ -8,7 +8,7 @@ import pytest
 import torch
 from triton._internal_testing import is_cuda
 from triton._instrumentation import instrument, is_enabled, register_instrumentation, unregister_instrumentation
-from triton.experimental.autodiff import Const, Duplicated, _find_enzyme_opt, fwddiff
+from triton.experimental.autodiff import Const, Duplicated, _load_enzyme, fwddiff
 
 
 def test_instrumentation_mode():
@@ -36,9 +36,9 @@ def test_dynamic_instrumentation_and_dialect_loading():
     assert not instrument("context", point="load-dialects", backend="test")
 
 
-def _has_enzyme_opt():
+def _has_enzyme():
     try:
-        _find_enzyme_opt()
+        _load_enzyme()
     except RuntimeError:
         return False
     return True
@@ -107,7 +107,7 @@ def test_inspection(monkeypatch, fresh_knobs, tmp_path: pathlib.Path):
 
 
 @pytest.mark.skipif(not is_cuda(), reason="only currently tested on CUDA")
-@pytest.mark.skipif(not _has_enzyme_opt(), reason="enzymexlamlir-opt is required for Triton fwddiff")
+@pytest.mark.skipif(not _has_enzyme(), reason="Enzyme-JAX is required for Triton fwddiff")
 def test_fwddiff_vector_add(fresh_triton_cache):
     device = triton.runtime.driver.active.get_active_torch_device()
 

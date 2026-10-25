@@ -1,13 +1,12 @@
-triton.autodiff
-===============
+triton.experimental.autodiff
+===========================
 
-.. currentmodule:: triton
+.. currentmodule:: triton.experimental
 
 .. warning::
 
    This API is experimental. It currently supports forward-mode differentiation
-   of simple Triton kernels by shelling out to Enzyme-JAX's
-   ``enzymexlamlir-opt`` and differentiating Triton TTIR.
+   of simple Triton kernels through the Enzyme-JAX Python bindings.
 
 ``fwddiff`` adapts a ``triton.jit`` kernel at launch time. It returns a
 callable kernel object that uses Triton's normal ``kernel[grid](...)`` launch
@@ -27,6 +26,8 @@ output and the tangent output:
 
 .. code-block:: python
 
+   from triton.experimental import Const, Duplicated, fwddiff
+
    @triton.jit
    def add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
        pid = tl.program_id(axis=0)
@@ -40,11 +41,11 @@ output and the tangent output:
    doutput = torch.empty_like(output)
    grid = lambda meta: (triton.cdiv(output.numel(), meta["BLOCK_SIZE"]), )
 
-   triton.fwddiff(add_kernel)[grid](
-       triton.Duplicated(x, dx),
-       triton.Duplicated(y, dy),
-       triton.Duplicated(output, doutput),
-       triton.Const(output.numel()),
+   fwddiff(add_kernel)[grid](
+       Duplicated(x, dx),
+       Duplicated(y, dy),
+       Duplicated(output, doutput),
+       Const(output.numel()),
        BLOCK_SIZE=1024,
    )
 
@@ -57,16 +58,24 @@ To launch the original primal kernel, call it directly:
 
    add_kernel[grid](x, y, output, output.numel(), BLOCK_SIZE=1024)
 
-By default Triton searches for ``enzymexlamlir-opt`` on ``PATH`` and in the
-local Enzyme-JAX checkout paths used by the development environment. Set
-``TRITON_ENZYME_OPT`` to point at the optimizer binary if it lives elsewhere.
+Install an Enzyme-JAX wheel built with Triton support in the same Python
+environment as Triton:
+
+.. code-block:: bash
+
+   python -m pip install /path/to/enzyme_ad-*.whl
+
+Triton calls ``enzyme_ad.jax.enzyme_call.run_pass_pipeline`` to transform the
+TTIR. Enzyme-JAX is loaded when you first use autodiff. The wheel's Python
+package also imports JAX, but the transformation takes MLIR text, not JAX arrays.
+The ``enzyme_opt`` argument has been removed. ``TRITON_ENZYME_OPT`` has no effect.
 
 When Triton cannot infer the tensor shape used by Enzyme's wrapper module, pass
 ``tensor_shape`` to the ``fwddiff`` adapter:
 
 .. code-block:: python
 
-   diff_kernel = triton.fwddiff(kernel, tensor_shape=(1024,))
+   diff_kernel = fwddiff(kernel, tensor_shape=(1024,))
    diff_kernel[grid](...)
 
 API reference

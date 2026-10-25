@@ -10,11 +10,13 @@ against PyTorch references. Run one case from the Triton repository root with:
 ```bash
 mamba activate triton-dev
 export PYTHONPATH="$PWD/python"
-export TRITON_ENZYME_OPT="$PWD/../Enzyme-JAX/bazel-bin/enzymexlamlir-opt"
+python -m pip install /path/to/enzyme_ad-*.whl
 export TRITON_ALWAYS_COMPILE=1
 
 python benchmark/01-vector-add.py
 ```
+
+Use an Enzyme-JAX wheel built with Triton support for your Python version.
 
 The other workloads are directly runnable in the same way:
 
