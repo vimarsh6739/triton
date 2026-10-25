@@ -11,11 +11,10 @@ import functools
 import hashlib
 import os
 import re
-import shutil
-import subprocess
 import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Iterable, Sequence, cast
 
@@ -26,11 +25,6 @@ __all__ = ["Const", "Duplicated", "autodiff", "fwddiff"]
 
 _FORWARD_MODE = "ForwardMode"
 _SUPPORTED_MODES = {"forward": _FORWARD_MODE, "fwd": _FORWARD_MODE, _FORWARD_MODE: _FORWARD_MODE}
-_ENZYME_OPT_ENV = "TRITON_ENZYME_OPT"
-_ENZYME_OPT_FALLBACKS = (
-    "/home/vimarsh6739/hiord/Enzyme-JAX/bazel-bin/enzymexlamlir-opt",
-    "/mnt/vimarsh6739/hiord/Enzyme-JAX/bazel-bin/enzymexlamlir-opt",
-)
 
 
 @dataclass(frozen=True)
@@ -50,15 +44,14 @@ class _DiffSpec:
     arg_names: tuple[str, ...]
     arg_activities: tuple[str, ...]
     runtime_arg_names: tuple[str, ...]
-    enzyme_opt: str
+    enzyme_version: str
     tensor_shape: tuple[int, ...] | None
     keep_temps: bool
 
     @property
     def key_material(self) -> str:
-        return repr(
-            (self.mode, self.arg_names, self.arg_activities, self.runtime_arg_names, self.enzyme_opt,
-             self.tensor_shape, self.keep_temps))
+        return repr((self.mode, self.arg_names, self.arg_activities, self.runtime_arg_names, self.enzyme_version,
+                     self.tensor_shape, self.keep_temps))
 
 
 def _normalize_mode(mode: str) -> str:
@@ -69,22 +62,18 @@ def _normalize_mode(mode: str) -> str:
         raise ValueError(f"Unsupported Triton autodiff mode {mode!r}; supported modes: {supported}") from exc
 
 
-def _find_enzyme_opt(enzyme_opt: str | None = None) -> str:
-    candidates = []
-    if enzyme_opt is not None:
-        candidates.append(enzyme_opt)
-    if env_path := os.environ.get(_ENZYME_OPT_ENV):
-        candidates.append(env_path)
-    if path_opt := shutil.which("enzymexlamlir-opt"):
-        candidates.append(path_opt)
-    candidates.extend(_ENZYME_OPT_FALLBACKS)
+def _load_enzyme():
+    try:
+        from enzyme_ad.jax import enzyme_call
+    except ImportError as exc:
+        raise RuntimeError("Triton autodiff requires an Enzyme-JAX wheel built with Triton support. "
+                           "Install the wheel with 'python -m pip install /path/to/enzyme_ad-*.whl'.") from exc
+    return enzyme_call
 
-    for candidate in candidates:
-        if candidate and os.path.exists(candidate) and os.access(candidate, os.X_OK):
-            return candidate
 
-    raise RuntimeError(
-        "Unable to find enzymexlamlir-opt. Set TRITON_ENZYME_OPT to the Enzyme-JAX optimizer binary.")
+@functools.cache
+def _enzyme_version() -> str:
+    return version("enzyme-ad")
 
 
 def _is_pointer_signature_type(ty: str) -> bool:
@@ -184,7 +173,7 @@ def _build_enzyme_module(
   }}
   func.func @main({args}) -> ({result_type_text}) {{
     %c1 = stablehlo.constant dense<1> : tensor<i64>
-    {result_bind} = enzymexla_tt_ext.call @{entry_name}_tt::@{entry_name}_inner::@{entry_name} clusters in(%c1, %c1, %c1) blocks in(%c1, %c1, %c1) ({operands}) {{output_operand_aliases = [{aliases}]}} : ({", ".join(stablehlo_types)}) -> ({result_type_text})
+    {result_bind} = enzymexla_tt_ext.call @{entry_name}_tt::@{entry_name}_inner::@{entry_name} clusters in(%c1, %c1, %c1) blocks in(%c1, %c1, %c1) ({operands}) <{{output_operand_aliases = [{aliases}]}}> : ({", ".join(stablehlo_types)}) -> ({result_type_text})
     return {result_refs} : {result_type_text}
   }}
 }}
@@ -234,16 +223,10 @@ def _derivative_func_name(mode: str, entry_name: str) -> str:
     raise ValueError(f"Unsupported Triton autodiff mode {mode!r}")
 
 
-def _write_temp_mlir(text: str, keep: bool, prefix: str) -> str:
-    handle = tempfile.NamedTemporaryFile("w", suffix=".mlir", prefix=prefix, delete=False)
-    try:
+def _write_temp_mlir(text: str, prefix: str) -> str:
+    with tempfile.NamedTemporaryFile("w", suffix=".mlir", prefix=prefix, delete=False) as handle:
         handle.write(text)
         return handle.name
-    finally:
-        handle.close()
-        if not keep:
-            # The caller may still need the path briefly, so unlinking is handled after use.
-            pass
 
 
 def _differentiate_ttir_module(mod, spec: _DiffSpec):
@@ -258,20 +241,22 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
     except KeyError as exc:
         raise RuntimeError(f"Missing Triton fwddiff activity for kernel argument {exc.args[0]!r}") from exc
     wrapper, pass_arg = _build_enzyme_module(ttir, entry_name, signature, spec, arg_activities)
-    wrapper_path = _write_temp_mlir(wrapper, spec.keep_temps, "triton-enzyme-in-")
-    out_path = None
+    if spec.keep_temps:
+        _write_temp_mlir(wrapper, "triton-enzyme-in-")
+    enzyme_call = _load_enzyme()
+    pipeline = f"enzyme-wrap{{{pass_arg}}},canonicalize"
     try:
-        cmd = [spec.enzyme_opt, wrapper_path, f"--enzyme-wrap={pass_arg}", "--canonicalize"]
-        result = subprocess.run(cmd, check=False, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            raise RuntimeError(
-                "enzymexlamlir-opt failed while differentiating Triton TTIR:\n"
-                f"command: {' '.join(cmd)}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+        _, output = enzyme_call.run_pass_pipeline([], wrapper, pipeline)
+    except ValueError as exc:
+        raise RuntimeError(f"Enzyme-JAX failed while differentiating Triton TTIR:\n{exc}") from exc
 
-        diff_name = _derivative_func_name(spec.mode, entry_name)
-        diff_func = _make_public(_find_tt_func(result.stdout, diff_name))
-        diff_module = f"module {{\n{diff_func}\n}}\n"
-        out_path = _write_temp_mlir(diff_module, spec.keep_temps, "triton-enzyme-out-")
+    diff_name = _derivative_func_name(spec.mode, entry_name)
+    diff_func = _make_public(_find_tt_func(output, diff_name))
+    # Keep the location aliases used by the extracted function.
+    locations = "\n".join(line for line in output.splitlines() if line.startswith("#loc"))
+    diff_module = f"module {{\n{diff_func}\n}}\n{locations}\n"
+    out_path = _write_temp_mlir(diff_module, "triton-enzyme-out-")
+    try:
         parsed = ir.parse_mlir_module(out_path, mod.context)
         parsed.context = mod.context
         if not parsed.verify():
@@ -279,12 +264,7 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
         return parsed
     finally:
         if not spec.keep_temps:
-            for path in (wrapper_path, out_path):
-                if path:
-                    try:
-                        os.unlink(path)
-                    except FileNotFoundError:
-                        pass
+            os.unlink(out_path)
 
 
 def _pipeline_cache_key(spec: _DiffSpec) -> tuple[str, str]:
@@ -387,12 +367,11 @@ def _normalize_activities(arg_activities: Iterable[str | None] | None) -> tuple[
 
 class _AutodiffKernel:
 
-    def __init__(self, kernel, *, mode: str, arg_activities: Iterable[str | None] | None, enzyme_opt: str | None,
+    def __init__(self, kernel, *, mode: str, arg_activities: Iterable[str | None] | None,
                  tensor_shape: int | Sequence[int] | None, keep_temps: bool):
         self._kernel = kernel
         self._mode = _normalize_mode(mode)
         self._configured_arg_activities = _normalize_activities(arg_activities)
-        self._enzyme_opt = enzyme_opt
         if isinstance(tensor_shape, int):
             self._tensor_shape = (tensor_shape, )
         elif tensor_shape is None:
@@ -474,6 +453,7 @@ class _AutodiffKernel:
     def run(self, *args, grid, warmup, **kwargs):
         from ..runtime.driver import driver
 
+        _load_enzyme()
         compile_args, compile_kwargs, bound_args, flat_args_by_name, arg_names, activities = self._flatten_args(
             args, kwargs)
         device = driver.active.get_current_device()
@@ -488,7 +468,7 @@ class _AutodiffKernel:
             arg_names=arg_names,
             arg_activities=activities,
             runtime_arg_names=runtime_arg_names,
-            enzyme_opt=_find_enzyme_opt(self._enzyme_opt),
+            enzyme_version=_enzyme_version(),
             tensor_shape=self._tensor_shape,
             keep_temps=self._keep_temps,
         )
@@ -528,14 +508,13 @@ class _AutodiffKernel:
 
 
 def autodiff(kernel=None, *, mode: str = "forward", arg_activities: Iterable[str | None] | None = None,
-             enzyme_opt: str | None = None, tensor_shape: int | Sequence[int] | None = None,
-             keep_temps: bool = False):
+             tensor_shape: int | Sequence[int] | None = None, keep_temps: bool = False):
+
     def decorator(fn):
         return _AutodiffKernel(
             fn,
             mode=mode,
             arg_activities=arg_activities,
-            enzyme_opt=enzyme_opt,
             tensor_shape=tensor_shape,
             keep_temps=keep_temps,
         )

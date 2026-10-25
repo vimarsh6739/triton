@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 
-from .experimental.autodiff import Const, Duplicated, _find_enzyme_opt, autodiff, fwddiff
+from .experimental.autodiff import Const, Duplicated, autodiff, fwddiff
 
 warnings.warn(
     "triton.autodiff is experimental and has moved to triton.experimental.autodiff.",
