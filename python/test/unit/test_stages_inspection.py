@@ -226,3 +226,163 @@ def test_rolling_update_proof_protocol(supported):
     else:
         assert response["reason"]
         assert "correction" not in response
+
+
+def _install_rolling_update_hook(fresh_knobs, tile_size):
+    import sys
+    from triton._C.libtriton import ir, passes
+
+    pytest.importorskip("sympy")
+    key = f"rolling-update:{tile_size}:" + pathlib.Path(__file__).read_text()
+    digest = hashlib.sha256(key.encode()).hexdigest()
+
+    def inspect_stages(self=None, stages=None, options=None, language=None, capability=None):
+        if stages is None:
+            return key, digest
+        original_ttir = stages["ttir"]
+
+        def rolling_ttir(src, metadata):
+            module = original_ttir(src, metadata)
+            pm = ir.pass_manager(module.context)
+            passes.ttir.add_rolling_update(pm, tile_size, True, False, sys.executable)
+            pm.run(module, "rolling_update")
+            return module
+
+        stages["ttir"] = rolling_ttir
+
+    fresh_knobs.runtime.add_stages_inspection_hook = inspect_stages
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA rolling-update correctness")
+@pytest.mark.parametrize("mode", ["plain", "causal", "softcap"])
+@pytest.mark.parametrize("tile_size,n,d", [(32, 113, 32), (64, 241, 64)])
+def test_rolling_update_attention(fresh_knobs, fresh_triton_cache, mode, tile_size, n, d):
+    _install_rolling_update_hook(fresh_knobs, tile_size)
+
+    @triton.jit
+    def attention(Q, K, V, O, M: tl.constexpr, N: tl.constexpr, D: tl.constexpr, FULL_N: tl.constexpr,
+                  MODE: tl.constexpr, BM: tl.constexpr):
+        rows = tl.program_id(0) * BM + tl.arange(0, BM)
+        keys = tl.arange(0, FULL_N)
+        dims = tl.arange(0, D)
+        q = tl.load(Q + rows[:, None] * D + dims[None, :], rows[:, None] < M, 0)
+        k = tl.load(K + keys[None, :] * D + dims[:, None], keys[None, :] < N, 0)
+        scores = tl.dot(q, k, input_precision="ieee") * (D**-0.5)
+        if MODE == "softcap":
+            scores = 4. * tl.extra.libdevice.tanh(scores / 4.)
+        valid = keys[None, :] < N
+        if MODE == "causal":
+            valid = valid & (rows[:, None] >= keys[None, :])
+        scores = tl.where(valid, scores, -1.e6)
+        weights = tl.exp(scores - tl.max(scores, 1)[:, None])
+        weights = weights / tl.sum(weights, 1)[:, None]
+        v = tl.load(V + keys[:, None] * D + dims[None, :], keys[:, None] < N, 0)
+        result = tl.dot(weights, v, input_precision="ieee")
+        tl.store(O + rows[:, None] * D + dims[None, :], result, rows[:, None] < M)
+
+    torch.manual_seed(42)
+    m, bm = 37, 16
+    q = torch.randn(m, d, device="cuda", dtype=torch.float32)
+    k = torch.randn(n, d, device="cuda", dtype=torch.float32)
+    v = torch.randn_like(k)
+    output = torch.empty_like(q)
+    compiled = attention[(triton.cdiv(m, bm), )](q, k, v, output, m, n, d, triton.next_power_of_2(n), mode, bm,
+                                                 num_warps=4)
+    scores = (q @ k.T) * (d**-0.5)
+    if mode == "softcap":
+        scores = 4. * torch.tanh(scores / 4.)
+    if mode == "causal":
+        scores = scores.masked_fill(
+            torch.arange(m, device="cuda")[:, None] < torch.arange(n, device="cuda")[None, :], -1.e6)
+    expected = scores.softmax(-1) @ v
+    torch.testing.assert_close(output, expected, atol=1.e-4, rtol=1.e-4)
+
+    ttir = compiled.asm["ttir"]
+    assert "scf.for" in ttir
+    dots = [line for line in ttir.splitlines() if " = tt.dot " in line]
+    assert len(dots) == 2
+    assert f"tensor<{bm}x{d}xf32> * tensor<{d}x{tile_size}xf32> -> tensor<{bm}x{tile_size}xf32>" in dots[0]
+    assert f"tensor<{bm}x{tile_size}xf32> * tensor<{tile_size}x{d}xf32> -> tensor<{bm}x{d}xf32>" in dots[1]
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA rolling-update correctness")
+@pytest.mark.parametrize("n,tile_size,zero_prefix", [(127, 32, False), (257, 64, False), (127, 32, True)])
+def test_rolling_update_stable_l2(fresh_knobs, fresh_triton_cache, n, tile_size, zero_prefix):
+    _install_rolling_update_hook(fresh_knobs, tile_size)
+
+    @triton.jit
+    def stable_l2(X, O, N: tl.constexpr, FULL_N: tl.constexpr):
+        row = tl.program_id(0)
+        columns = tl.arange(0, FULL_N)
+        x = tl.load(X + row * N + columns, columns < N, 0)
+        maximum = tl.max(tl.abs(x), 0)
+        normalized = x / maximum
+        norm = tl.sqrt(tl.sum(normalized * normalized, 0)) * maximum
+        tl.store(O + row, norm)
+
+    torch.manual_seed(43)
+    x = torch.randn(7, n, device="cuda") * torch.logspace(-30, 30, 7, device="cuda")[:, None]
+    if zero_prefix:
+        x[:, :tile_size] = 0.
+    output = torch.empty(7, device="cuda")
+    compiled = stable_l2[(7, )](x, output, n, triton.next_power_of_2(n), num_warps=4)
+    expected = x.double().square().sum(-1).sqrt().float()
+    torch.testing.assert_close(output, expected, atol=0., rtol=2.e-5)
+    ttir = compiled.asm["ttir"]
+    assert "scf.for" in ttir
+    assert ttir.count('"tt.reduce"') == 2
+    assert f"(tensor<{tile_size}xf32>) -> f32" in ttir
+    assert f"(tensor<{triton.next_power_of_2(n)}xf32>) -> f32" not in ttir
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA rolling-update correctness")
+def test_rolling_update_signed_normalization_zero_prefix(fresh_knobs, fresh_triton_cache):
+    _install_rolling_update_hook(fresh_knobs, 32)
+
+    @triton.jit
+    def normalize(X, Y, O, N: tl.constexpr):
+        columns = tl.arange(0, N)
+        x = tl.load(X + columns)
+        y = tl.load(Y + columns)
+        denominator = tl.sum(x, 0)
+        result = tl.sum((x / denominator) * y, 0)
+        tl.store(O, result)
+
+    x = torch.ones(128, device="cuda")
+    x[1:64:2] = -1.
+    y = torch.arange(1, 129, device="cuda", dtype=torch.float32)
+    output = torch.empty(1, device="cuda")
+    # The first two tiles have zero denominators but nonzero weighted sums.
+    assert x[:64].sum().item() == 0.
+    compiled = normalize[(1, )](x, y, output, 128, num_warps=4)
+    expected = ((x / x.sum()) * y).sum().reshape(1)
+    torch.testing.assert_close(output, expected, atol=1.e-4, rtol=1.e-4)
+    assert "scf.for" in compiled.asm["ttir"]
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA rolling-update correctness")
+@pytest.mark.parametrize("all_masked", [False, True])
+def test_rolling_update_masked_normalization(fresh_knobs, fresh_triton_cache, all_masked):
+    _install_rolling_update_hook(fresh_knobs, 32)
+
+    @triton.jit
+    def normalize(S, V, O, N: tl.constexpr, FULL_N: tl.constexpr):
+        columns = tl.arange(0, FULL_N)
+        scores = tl.load(S + columns, columns < N, -float("inf"))
+        values = tl.load(V + columns, columns < N, 0.)
+        weight = tl.exp(scores - tl.max(scores, 0))
+        probability = weight / tl.sum(weight, 0)
+        tl.store(O, tl.sum(probability * values, 0))
+
+    n = 113
+    scores = torch.linspace(-1002., -998., n, device="cuda")
+    scores[:32] = -torch.inf
+    if all_masked:
+        scores.fill_(-torch.inf)
+    values = torch.linspace(-1., 2., n, device="cuda")
+    output = torch.empty(1, device="cuda")
+    compiled = normalize[(1, )](scores, values, output, n, 128, num_warps=4)
+    # An entirely masked original softmax is NaN; the pass must retain that.
+    expected = (scores.softmax(0) * values).sum().reshape(1)
+    torch.testing.assert_close(output, expected, atol=1.e-4, rtol=1.e-4, equal_nan=True)
+    assert "scf.for" in compiled.asm["ttir"]

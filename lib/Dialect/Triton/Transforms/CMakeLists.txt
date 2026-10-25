@@ -12,6 +12,7 @@ add_triton_library(TritonTransforms
   AlgebraicCorrection.cpp
   TileRematerialization.cpp
   RollingUpdateAnalysis.cpp
+  RollingUpdate.cpp
   RewriteTensorDescriptorToPointer.cpp
   ArithTypeConversion.cpp
   FunctionTypeConversion.cpp
