@@ -11,6 +11,7 @@ add_triton_library(TritonTransforms
   ReorderBroadcast.cpp
   AlgebraicCorrection.cpp
   TileRematerialization.cpp
+  RollingUpdateAnalysis.cpp
   RewriteTensorDescriptorToPointer.cpp
   ArithTypeConversion.cpp
   FunctionTypeConversion.cpp
