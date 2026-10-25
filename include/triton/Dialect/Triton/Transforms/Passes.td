@@ -79,4 +79,44 @@ def TritonLoopAwareCSE : Pass<"triton-loop-aware-cse", "mlir::ModuleOp"> {
   }];
 }
 
+def TritonRollingUpdate : Pass<"triton-rolling-update", "mlir::ModuleOp"> {
+  let summary = "Fuse dependent TTIR reductions with algebraically derived repairs";
+  let description = [{
+    Applies Neptune's rolling-update transformation directly to unencoded TTIR.
+    Extracts expressions between reductions, proves their additive repair using
+    SymPy, and rematerializes producer tiles inside an scf.for loop. Unsupported
+    expressions or unsafe memory ordering leave the candidate unchanged.
+    Requires explicit permission for floating-point reassociation. Crossing
+    precision-changing casts requires a separate explicit permission.
+
+    The supported algebraic case is g(r,c) = A(r) B(c), with an additive
+    consumer and a nonzero parameter factor A. The helper proves both term
+    correction and compatibility with addition; it does not prove numerical
+    stability for arbitrary input ranges. In particular, changing exponential
+    references can introduce overflow or underflow. The proof applies over real
+    arithmetic where the source map is defined, not to all IEEE exceptional
+    cases. Partial reductions use valid temporary references and a final repair.
+
+    The pass is opt-in and runs before layout assignment. It supports fixed
+    reduction extents divisible by tile-size, simple add/max/min reductions,
+    and rank-two dots with zero accumulators. It does not perform split-K or
+    autotuning. SymPy is needed only by the selected helper interpreter; a
+    missing helper or unsupported proof leaves the candidate unchanged.
+    See https://arxiv.org/abs/2510.08726 for Neptune's transformation.
+  }];
+  let options = [
+    Option<"tileSize", "tile-size", "int", "32", "Rolling reduction tile size">,
+    Option<"allowReassociation", "allow-reassociation", "bool", "false",
+           "Permit real-arithmetic reassociation of floating-point reductions">,
+    Option<"allowPrecisionChanges", "allow-precision-changes", "bool", "false",
+           "Permit changed rounding across floating-point casts">,
+    Option<"pythonExecutable", "python-executable", "std::string", "\"python3\"",
+           "Python interpreter with Triton and SymPy for correction proofs">,
+    Option<"reportFailures", "report-failures", "bool", "false",
+           "Emit remarks explaining declined rolling-update candidates">
+  ];
+  let dependentDialects = ["mlir::triton::TritonDialect", "mlir::arith::ArithDialect",
+                          "mlir::math::MathDialect", "mlir::scf::SCFDialect"];
+}
+
 #endif

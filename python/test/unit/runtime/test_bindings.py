@@ -27,6 +27,145 @@ def test_llvm_ir_to_bitcode_reports_invalid_ir():
         llvm.to_bitcode("invalid LLVM IR")
 
 
+def _run_rolling_update_ir(source, tmp_path, *, reassociate=True, python_executable=None):
+    from triton._C.libtriton import ir, passes
+
+    pytest.importorskip("sympy")
+    path = tmp_path / "rolling_update.mlir"
+    path.write_text(source)
+    context = ir.context()
+    ir.load_dialects(context)
+    module = ir.parse_mlir_module(str(path), context)
+    pm = ir.pass_manager(context)
+    passes.ttir.add_rolling_update(pm, 2, reassociate, False, python_executable or sys.executable)
+    pm.run(module, "rolling_update_legality")
+    assert module.verify()
+    return str(module)
+
+
+@pytest.mark.parametrize("case", [
+    "accepted", "disabled", "volatile", "intervening_store", "tensor_argument", "dense_constant", "unsupported_map",
+    "observed_intermediate", "early_state_user", "pure_extern", "impure_extern", "missing_python", "quarter_power"
+])
+def test_rolling_update_native_legality(case, tmp_path):
+    # Every rejected case differs from the accepted, load-based producer. The
+    # control also ensures a missing symbolic helper cannot make rejection
+    # coverage pass accidentally.
+    arguments = "%input: !tt.ptr<f32>, %output: !tt.ptr<f32>"
+    source = """
+      %indices = tt.make_range {start = 0 : i32, end = 8 : i32} : tensor<8xi32>
+      %base = tt.splat %input : !tt.ptr<f32> -> tensor<8x!tt.ptr<f32>>
+      %pointers = tt.addptr %base, %indices : tensor<8x!tt.ptr<f32>>, tensor<8xi32>
+      %x = tt.load %pointers : tensor<8x!tt.ptr<f32>>
+    """
+    if case == "volatile":
+        source = source.replace("tt.load %pointers", "tt.load %pointers {isVolatile = true}")
+    elif case == "intervening_store":
+        source += "%zero = arith.constant 0.0 : f32\ntt.store %input, %zero : !tt.ptr<f32>\n"
+    elif case == "tensor_argument":
+        arguments += ", %x: tensor<8xf32>"
+        source = ""
+    elif case == "dense_constant":
+        source = "%x = arith.constant dense<[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]> : tensor<8xf32>"
+    elif case in ("pure_extern", "impure_extern"):
+        source = source.replace("%x = tt.load", "%raw = tt.load")
+        pure = "true" if case == "pure_extern" else "false"
+        source += (f'%x = tt.extern_elementwise %raw {{libname = "libdevice", libpath = "", '
+                   f'symbol = "__nv_tanhf", pure = {pure}}} : (tensor<8xf32>) -> tensor<8xf32>')
+    result_types, results = "f32", "%total"
+    after_max = ""
+    if case == "observed_intermediate":
+        result_types, results = "f32, tensor<8xf32>", "%total, %x"
+    elif case == "early_state_user":
+        after_max = "%early = math.exp %maximum : f32"
+        result_types, results = "f32, f32", "%total, %early"
+    operation = "math.tanh" if case == "unsupported_map" else "math.exp"
+    mapping = f"%mapped = {operation} %shifted : tensor<8xf32>"
+    if case == "quarter_power":
+        # The symbolic factor exists, but quarter powers are outside the native
+        # emitter's supported arithmetic. Decline before emitting partial IR.
+        mapping = """
+          %quarter = arith.constant dense<0.25> : tensor<8xf32>
+          %powered = math.powf %reference, %quarter : tensor<8xf32>
+          %mapped = arith.divf %x, %powered : tensor<8xf32>
+        """
+    module = f"""module {{
+      tt.func @reduce_normalized({arguments}) -> ({result_types}) {{
+        {source}
+        %maximum = "tt.reduce"(%x) <{{axis = 0 : i32}}> ({{
+        ^bb0(%lhs: f32, %rhs: f32):
+          %max = arith.maxnumf %lhs, %rhs : f32
+          tt.reduce.return %max : f32
+        }}) : (tensor<8xf32>) -> f32
+        {after_max}
+        %reference = tt.splat %maximum : f32 -> tensor<8xf32>
+        %shifted = arith.subf %x, %reference : tensor<8xf32>
+        {mapping}
+        %total = "tt.reduce"(%mapped) <{{axis = 0 : i32}}> ({{
+        ^bb0(%lhs: f32, %rhs: f32):
+          %sum = arith.addf %lhs, %rhs : f32
+          tt.reduce.return %sum : f32
+        }}) : (tensor<8xf32>) -> f32
+        tt.return {results} : {result_types}
+      }}
+    }}"""
+    python_executable = str(tmp_path / "missing-python") if case == "missing_python" else None
+    result = _run_rolling_update_ir(module, tmp_path, reassociate=case != "disabled",
+                                    python_executable=python_executable)
+    accepted = case in ("accepted", "pure_extern")
+    assert ("scf.for" in result) == accepted
+    if accepted:
+        assert "tensor<2xf32>" in result
+        assert "tensor<8xf32>" not in result
+    if case == "volatile":
+        assert "isVolatile = true" in result
+    if case == "intervening_store":
+        assert "tt.store" in result
+    if case == "impure_extern":
+        assert "pure = false" in result
+
+
+def test_rolling_update_native_equal_extent_axes(tmp_path):
+    # Both dot operands are the same SSA tensor, and both dimensions have the
+    # same extent. Tiling output columns must keep the left operand intact and
+    # tile only the right operand's columns, including its pointer arithmetic.
+    source = """module {
+      tt.func @square_dot(%input: !tt.ptr<f32>) -> tensor<32xf32> {
+        %r = tt.make_range {start = 0 : i32, end = 32 : i32} : tensor<32xi32>
+        %row = tt.expand_dims %r {axis = 1 : i32} : tensor<32xi32> -> tensor<32x1xi32>
+        %col = tt.expand_dims %r {axis = 0 : i32} : tensor<32xi32> -> tensor<1x32xi32>
+        %stride = arith.constant dense<32> : tensor<32x1xi32>
+        %offset = arith.muli %row, %stride : tensor<32x1xi32>
+        %rows = tt.broadcast %offset : tensor<32x1xi32> -> tensor<32x32xi32>
+        %cols = tt.broadcast %col : tensor<1x32xi32> -> tensor<32x32xi32>
+        %indices = arith.addi %rows, %cols : tensor<32x32xi32>
+        %base = tt.splat %input : !tt.ptr<f32> -> tensor<32x32x!tt.ptr<f32>>
+        %pointers = tt.addptr %base, %indices : tensor<32x32x!tt.ptr<f32>>, tensor<32x32xi32>
+        %x = tt.load %pointers : tensor<32x32x!tt.ptr<f32>>
+        %zero = arith.constant dense<0.0> : tensor<32x32xf32>
+        %scores = tt.dot %x, %x, %zero : tensor<32x32xf32> * tensor<32x32xf32> -> tensor<32x32xf32>
+        %maximum = "tt.reduce"(%scores) <{axis = 1 : i32}> ({
+        ^bb0(%lhs: f32, %rhs: f32):
+          %max = arith.maxnumf %lhs, %rhs : f32
+          tt.reduce.return %max : f32
+        }) : (tensor<32x32xf32>) -> tensor<32xf32>
+        %expanded = tt.expand_dims %maximum {axis = 1 : i32} : tensor<32xf32> -> tensor<32x1xf32>
+        %reference = tt.broadcast %expanded : tensor<32x1xf32> -> tensor<32x32xf32>
+        %shifted = arith.subf %scores, %reference : tensor<32x32xf32>
+        %mapped = math.exp %shifted : tensor<32x32xf32>
+        %total = "tt.reduce"(%mapped) <{axis = 1 : i32}> ({
+        ^bb0(%lhs: f32, %rhs: f32):
+          %sum = arith.addf %lhs, %rhs : f32
+          tt.reduce.return %sum : f32
+        }) : (tensor<32x32xf32>) -> tensor<32xf32>
+        tt.return %total : tensor<32xf32>
+      }
+    }"""
+    result = _run_rolling_update_ir(source, tmp_path)
+    assert "scf.for" in result
+    assert "tensor<32x32xf32> * tensor<32x2xf32> -> tensor<32x2xf32>" in result
+
+
 @pytest.mark.parametrize("dtype", ["i8", "i16", "i32", "i64", "f16", "f32", "f64"])
 @pytest.mark.parametrize("num_elements", [2, 4])
 @pytest.mark.parametrize("enable_nvptx_tti", [False, True])
