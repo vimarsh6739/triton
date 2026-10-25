@@ -17,7 +17,19 @@ def TritonCombineOps : Pass</*cli-arg*/"triton-combine", /*Op*/"mlir::ModuleOp">
     - `broadcast(constant) => reshaped_constant`
     - `torch.sum(x[:,:,None].expand(-1,-1,n) * y[None,:,:].expand(m,-1,-1),1)
        => dot(x,y,splat(0))`
+
+    With enable-reduction-reassociation, also move a reduction-invariant
+    denominator outside a floating-point sum, optionally through one multiply:
+    `sum((x / z) * y) => sum(x * y) / z`. This opt-in permits changes in
+    rounding, overflow, underflow, and exceptional-value behavior. It applies
+    to unencoded TTIR and does not introduce tiling or streaming loops.
   }];
+
+  let options = [
+    Option<"enableReductionReassociation", "enable-reduction-reassociation",
+           "bool", /*default*/"false",
+           "Allow floating-point reassociation to hoist invariant division out of sums">
+  ];
 
   let dependentDialects = ["mlir::arith::ArithDialect"];
 }

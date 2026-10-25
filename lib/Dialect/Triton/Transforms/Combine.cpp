@@ -1,5 +1,6 @@
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Dominance.h"
+#include "mlir/IR/IRMapping.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -194,6 +195,71 @@ public:
   }
 };
 
+// sum(x / z) -> sum(x) / z, and sum((x / z) * y) -> sum(x * y) / z.
+// Only registered when the caller explicitly permits FP reassociation.
+class HoistReductionDivisionPattern : public OpRewritePattern<ReduceOp> {
+public:
+  HoistReductionDivisionPattern(MLIRContext *context)
+      : OpRewritePattern(context, /*benefit=*/2) {}
+
+  LogicalResult matchAndRewrite(ReduceOp reduce,
+                                PatternRewriter &rewriter) const override {
+    // getSingleCombiner alone does not exclude other region operations.
+    if (!isa_and_nonnull<arith::AddFOp>(reduce.getSingleCombiner()) ||
+        reduce.getCombineOp().front().getOperations().size() != 2)
+      return failure();
+    Value input = reduce.getOperand(0);
+    if (cast<RankedTensorType>(input.getType()).getEncoding())
+      return failure();
+
+    auto mul = input.getDefiningOp<arith::MulFOp>();
+    auto div = input.getDefiningOp<arith::DivFOp>();
+    Value payload;
+    if (mul) {
+      div = mul.getLhs().getDefiningOp<arith::DivFOp>();
+      payload = mul.getRhs();
+      if (!div) {
+        div = mul.getRhs().getDefiningOp<arith::DivFOp>();
+        payload = mul.getLhs();
+      }
+    }
+    if (!div)
+      return failure();
+
+    Type resultType = reduce->getResult(0).getType();
+    Value denominator;
+    auto splat = div.getRhs().getDefiningOp<SplatOp>();
+    if (splat) {
+      denominator = splat.getSrc();
+    } else {
+      auto broadcast = div.getRhs().getDefiningOp<BroadcastOp>();
+      if (!broadcast)
+        return failure();
+      auto expand = broadcast.getSrc().getDefiningOp<ExpandDimsOp>();
+      if (!expand || expand.getAxis() != reduce.getAxis() ||
+          expand.getSrc().getType() != resultType)
+        return failure();
+      denominator = expand.getSrc();
+    }
+
+    auto loc = reduce.getLoc();
+    if (splat && isa<RankedTensorType>(resultType))
+      denominator = SplatOp::create(rewriter, loc, resultType, denominator);
+    Value numerator = div.getLhs();
+    if (mul)
+      numerator = arith::MulFOp::create(rewriter, loc, numerator, payload);
+
+    // Clone the reduction to preserve its combiner and attributes without
+    // changing any other users of the original division or multiplication.
+    IRMapping mapping;
+    mapping.map(input, numerator);
+    auto sum = cast<ReduceOp>(rewriter.clone(*reduce, mapping));
+    rewriter.replaceOpWithNewOp<arith::DivFOp>(reduce, sum->getResult(0),
+                                               denominator);
+    return success();
+  }
+};
+
 class RankedReduceDescriptorLoads : public mlir::OpRewritePattern<ReshapeOp> {
 public:
   using OpRewritePattern::OpRewritePattern;
@@ -274,6 +340,8 @@ using CombineDotScaledAddFPattern =
 
 class CombineOpsPass : public impl::TritonCombineOpsBase<CombineOpsPass> {
 public:
+  using TritonCombineOpsBase::TritonCombineOpsBase;
+
   void runOnOperation() override {
     MLIRContext *context = &getContext();
     RewritePatternSet patterns(context);
@@ -286,6 +354,8 @@ public:
     patterns.add<CombineAddPtrPattern>(context);
     patterns.add<CombineBroadcastMulReducePattern>(context);
     patterns.add<RankedReduceDescriptorLoads>(context);
+    if (enableReductionReassociation)
+      patterns.add<HoistReductionDivisionPattern>(context);
 
     if (applyPatternsGreedily(m, std::move(patterns)).failed())
       signalPassFailure();

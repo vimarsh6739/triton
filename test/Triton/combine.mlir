@@ -1,4 +1,5 @@
-// RUN: triton-opt %s -canonicalize -triton-combine | FileCheck %s
+// RUN: triton-opt %s -canonicalize -triton-combine | FileCheck %s --check-prefixes=CHECK,NO-REASSOC
+// RUN: triton-opt %s -triton-combine="enable-reduction-reassociation=true" | FileCheck %s --check-prefix=REASSOC
 
 // We don't combine if the dot result is used by more than one op.
 // CHECK-LABEL: @test_combine_dot_add_invalid_pattern
@@ -660,4 +661,139 @@ tt.func @test_combine_broadcast_mul_reduce_multiple_results(%arg0: tensor<32x16x
         tt.reduce.return %6, %6 : f32, f32
     }) : (tensor<32x16x32xf32>, tensor<32x16x32xf32>) -> (tensor<32x32xf32>, tensor<32x32xf32>)
     tt.return %5#0 : tensor<32x32xf32>
+}
+
+// The default pass preserves the original division order.
+// NO-REASSOC-LABEL: @reduce_normalization
+// NO-REASSOC: %[[DIV:.*]] = arith.divf
+// NO-REASSOC: "tt.reduce"(%[[DIV]])
+// NO-REASSOC-NOT: arith.divf
+// NO-REASSOC: tt.return
+// REASSOC-LABEL: @reduce_normalization
+// REASSOC-NOT: arith.divf
+// REASSOC: %[[SUM:.*]] = "tt.reduce"(%arg0)
+// REASSOC: %[[OUT:.*]] = arith.divf %[[SUM]], %arg1 : tensor<4xf32>
+// REASSOC-NEXT: tt.return %[[OUT]]
+tt.func @reduce_normalization(%x: tensor<4x8xf32>, %z: tensor<4xf32>) -> tensor<4xf32> {
+  %e = tt.expand_dims %z {axis = 1 : i32} : tensor<4xf32> -> tensor<4x1xf32>
+  %b = tt.broadcast %e : tensor<4x1xf32> -> tensor<4x8xf32>
+  %p = arith.divf %x, %b : tensor<4x8xf32>
+  %sum = "tt.reduce"(%p) <{axis = 1 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    %s = arith.addf %lhs, %rhs : f32
+    tt.reduce.return %s : f32
+  }) : (tensor<4x8xf32>) -> tensor<4xf32>
+  tt.return %sum : tensor<4xf32>
+}
+
+// Reassociation must preserve an independently observed probability tensor.
+// REASSOC-LABEL: @reduce_weighted_normalization
+// REASSOC: %[[P:.*]] = arith.divf %arg0, %{{.*}} : tensor<4x8xf32>
+// REASSOC: %[[XY:.*]] = arith.mulf %arg0, %arg1 : tensor<4x8xf32>
+// REASSOC: %[[SUM:.*]] = "tt.reduce"(%[[XY]])
+// REASSOC: %[[OUT:.*]] = arith.divf %[[SUM]], %arg2 : tensor<4xf32>
+// REASSOC-NEXT: tt.return %[[OUT]], %[[P]]
+tt.func @reduce_weighted_normalization(%x: tensor<4x8xf32>, %y: tensor<4x8xf32>, %z: tensor<4xf32>) -> (tensor<4xf32>, tensor<4x8xf32>) {
+  %e = tt.expand_dims %z {axis = 1 : i32} : tensor<4xf32> -> tensor<4x1xf32>
+  %b = tt.broadcast %e : tensor<4x1xf32> -> tensor<4x8xf32>
+  %p = arith.divf %x, %b : tensor<4x8xf32>
+  %xy = arith.mulf %p, %y : tensor<4x8xf32>
+  %sum = "tt.reduce"(%xy) <{axis = 1 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    %s = arith.addf %lhs, %rhs : f32
+    tt.reduce.return %s : f32
+  }) : (tensor<4x8xf32>) -> tensor<4xf32>
+  tt.return %sum, %p : tensor<4xf32>, tensor<4x8xf32>
+}
+
+// Division can be the right operand, and a splat supplies a scalar denominator.
+// REASSOC-LABEL: @reduce_weighted_normalization_reversed
+// REASSOC-NOT: arith.divf
+// REASSOC: %[[XY:.*]] = arith.mulf %arg0, %arg1 : tensor<8xf32>
+// REASSOC: %[[SUM:.*]] = "tt.reduce"(%[[XY]])
+// REASSOC: %[[OUT:.*]] = arith.divf %[[SUM]], %arg2 : f32
+// REASSOC-NEXT: tt.return %[[OUT]]
+tt.func @reduce_weighted_normalization_reversed(%x: tensor<8xf32>, %y: tensor<8xf32>, %z: f32) -> f32 {
+  %b = tt.splat %z : f32 -> tensor<8xf32>
+  %p = arith.divf %x, %b : tensor<8xf32>
+  %xy = arith.mulf %y, %p : tensor<8xf32>
+  %sum = "tt.reduce"(%xy) <{axis = 0 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    %s = arith.addf %lhs, %rhs : f32
+    tt.reduce.return %s : f32
+  }) : (tensor<8xf32>) -> f32
+  tt.return %sum : f32
+}
+
+// Broadcasting on another axis does not make z invariant over this reduction.
+// REASSOC-LABEL: @reduce_normalization_varying_denominator
+// REASSOC: %[[DIV:.*]] = arith.divf
+// REASSOC: "tt.reduce"(%[[DIV]])
+// REASSOC-NOT: arith.divf
+// REASSOC: tt.return
+tt.func @reduce_normalization_varying_denominator(%x: tensor<4x8xf32>, %z: tensor<8xf32>) -> tensor<4xf32> {
+  %e = tt.expand_dims %z {axis = 0 : i32} : tensor<8xf32> -> tensor<1x8xf32>
+  %b = tt.broadcast %e : tensor<1x8xf32> -> tensor<4x8xf32>
+  %p = arith.divf %x, %b : tensor<4x8xf32>
+  %sum = "tt.reduce"(%p) <{axis = 1 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    %s = arith.addf %lhs, %rhs : f32
+    tt.reduce.return %s : f32
+  }) : (tensor<4x8xf32>) -> tensor<4xf32>
+  tt.return %sum : tensor<4xf32>
+}
+
+// REASSOC-LABEL: @reduce_normalization_non_add
+// REASSOC: %[[DIV:.*]] = arith.divf
+// REASSOC: "tt.reduce"(%[[DIV]])
+// REASSOC: arith.maximumf
+// REASSOC-NOT: arith.divf
+// REASSOC: tt.return
+tt.func @reduce_normalization_non_add(%x: tensor<8xf32>, %z: f32) -> f32 {
+  %b = tt.splat %z : f32 -> tensor<8xf32>
+  %p = arith.divf %x, %b : tensor<8xf32>
+  %max = "tt.reduce"(%p) <{axis = 0 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    %m = arith.maximumf %lhs, %rhs : f32
+    tt.reduce.return %m : f32
+  }) : (tensor<8xf32>) -> f32
+  tt.return %max : f32
+}
+
+// An observable precision change must not be crossed.
+// REASSOC-LABEL: @reduce_normalization_cast
+// REASSOC: arith.divf
+// REASSOC: %[[CAST:.*]] = arith.truncf
+// REASSOC: "tt.reduce"(%[[CAST]])
+// REASSOC-NOT: arith.divf
+// REASSOC: tt.return
+tt.func @reduce_normalization_cast(%x: tensor<8xf32>, %z: f32) -> f16 {
+  %b = tt.splat %z : f32 -> tensor<8xf32>
+  %p = arith.divf %x, %b : tensor<8xf32>
+  %h = arith.truncf %p : tensor<8xf32> to tensor<8xf16>
+  %sum = "tt.reduce"(%h) <{axis = 0 : i32}> ({
+  ^bb0(%lhs: f16, %rhs: f16):
+    %s = arith.addf %lhs, %rhs : f16
+    tt.reduce.return %s : f16
+  }) : (tensor<8xf16>) -> f16
+  tt.return %sum : f16
+}
+
+// A binary return expression alone does not prove that the region is a sum.
+// REASSOC-LABEL: @reduce_normalization_extra_combiner_op
+// REASSOC: %[[DIV:.*]] = arith.divf
+// REASSOC: "tt.reduce"(%[[DIV]])
+// REASSOC: tt.print "combiner"
+// REASSOC-NOT: arith.divf
+// REASSOC: tt.return
+tt.func @reduce_normalization_extra_combiner_op(%x: tensor<8xf32>, %z: f32) -> f32 {
+  %b = tt.splat %z : f32 -> tensor<8xf32>
+  %p = arith.divf %x, %b : tensor<8xf32>
+  %sum = "tt.reduce"(%p) <{axis = 0 : i32}> ({
+  ^bb0(%lhs: f32, %rhs: f32):
+    tt.print "combiner" {hex = false, isSigned = array<i32>}
+    %s = arith.addf %lhs, %rhs : f32
+    tt.reduce.return %s : f32
+  }) : (tensor<8xf32>) -> f32
+  tt.return %sum : f32
 }
