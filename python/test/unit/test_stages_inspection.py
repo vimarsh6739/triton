@@ -153,3 +153,76 @@ def test_fwddiff_vector_add(fresh_triton_cache):
 
     torch.testing.assert_close(output, x + y)
     torch.testing.assert_close(doutput, dx + dy)
+
+
+def test_rolling_update_algebraic_correction():
+    import math
+    pytest.importorskip("sympy")
+    from triton.tools.rolling_update import derive_correction
+
+    def symbol(name):
+        return {"op": "symbol", "name": name}
+
+    def op(name, *args):
+        return {"op": name, "args": list(args)}
+
+    def evaluate(expr, values):
+        if expr["op"] == "symbol":
+            return values[expr["name"]]
+        if expr["op"] == "constant":
+            return expr["value"]
+        arguments = [evaluate(arg, values) for arg in expr["args"]]
+        functions = {
+            "add": lambda x, y: x + y, "sub": lambda x, y: x - y, "mul": lambda x, y: x * y, "div": lambda x, y: x / y,
+            "pow": lambda x, y: x**y, "exp": math.exp, "exp2": lambda x: 2.**x, "log": math.log
+        }
+        return functions[expr["op"]](*arguments)
+
+    x, y, m, z = (symbol(name) for name in ("x", "y", "m", "z"))
+    attention_term = op("mul", op("div", op("exp", op("sub", x, m)), z), y)
+    repair = derive_correction(attention_term, ["m", "z"])
+    assert repair is not None
+    # Two independent terms must be repaired by the same accumulated-state map.
+    old = {"m": 2., "z": 3.}
+    new = {"m": 4., "z": 5.}
+    payloads = [{"x": 1., "y": 7.}, {"x": 3., "y": -2.}]
+    accumulator = sum(evaluate(attention_term, old | payload) for payload in payloads)
+    repaired = evaluate(repair, {"acc": accumulator, "old_m": 2., "new_m": 4., "old_z": 3., "new_z": 5.})
+    expected = sum(evaluate(attention_term, new | payload) for payload in payloads)
+    assert repaired == pytest.approx(expected)
+
+    square = op("mul", op("div", x, m), op("div", x, m))
+    repair = derive_correction(square, ["m"])
+    assert repair is not None
+    assert evaluate(repair, {"acc": 3., "old_m": 2., "new_m": 4.}) == pytest.approx(0.75)
+    # Raising old/new scales separately would overflow or underflow in FP32.
+    for scale in (1.e-30, 1.e30):
+        actual = evaluate(repair,
+                          {"acc": torch.tensor(3.), "old_m": torch.tensor(scale), "new_m": torch.tensor(2. * scale)})
+        torch.testing.assert_close(actual, torch.tensor(0.75))
+    assert derive_correction(op("add", x, m), ["m"]) is None
+    assert derive_correction(op("tanh", attention_term), ["m", "z"]) is None
+    assert derive_correction(attention_term, ["m", "z"], reducer="max") is None
+
+
+@pytest.mark.parametrize("supported", [True, False])
+def test_rolling_update_proof_protocol(supported):
+    import json
+    import subprocess
+    import sys
+    pytest.importorskip("sympy")
+
+    expression = {"op": "div", "args": [{"op": "symbol", "name": "payload"}, {"op": "symbol", "name": "denominator"}]}
+    if not supported:
+        expression = {"op": "tanh", "args": [expression]}
+    request = {"expression": expression, "parameters": ["denominator"], "reducer": "add"}
+    process = subprocess.run([sys.executable, "-m", "triton.tools.rolling_update"], input=json.dumps(request),
+                             text=True, capture_output=True, check=True)
+    response = json.loads(process.stdout)
+    assert response["ok"] is supported
+    if supported:
+        assert isinstance(response["correction"], dict)
+        assert "op" in response["correction"]
+    else:
+        assert response["reason"]
+        assert "correction" not in response
