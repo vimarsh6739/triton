@@ -22,9 +22,8 @@ from .. import knobs
 
 __all__ = ["Const", "Duplicated", "autodiff", "fwddiff"]
 
-
 _FORWARD_MODE = "ForwardMode"
-_SUPPORTED_MODES = {"forward": _FORWARD_MODE, "fwd": _FORWARD_MODE, _FORWARD_MODE: _FORWARD_MODE}
+_REVERSE_MODE = "ReverseModeCombined"
 
 
 @dataclass(frozen=True)
@@ -52,14 +51,6 @@ class _DiffSpec:
     def key_material(self) -> str:
         return repr((self.mode, self.arg_names, self.arg_activities, self.runtime_arg_names, self.enzyme_version,
                      self.tensor_shape, self.keep_temps))
-
-
-def _normalize_mode(mode: str) -> str:
-    try:
-        return _SUPPORTED_MODES[mode]
-    except KeyError as exc:
-        supported = ", ".join(sorted(_SUPPORTED_MODES))
-        raise ValueError(f"Unsupported Triton autodiff mode {mode!r}; supported modes: {supported}") from exc
 
 
 def _load_enzyme():
@@ -136,9 +127,18 @@ def _build_enzyme_module(
     arg_activities: Sequence[str],
 ) -> tuple[str, str]:
     if len(arg_activities) != len(signature):
-        raise RuntimeError(
-            "Triton fwddiff activity/signature mismatch: "
-            f"got {len(arg_activities)} activities for {len(signature)} TTIR arguments")
+        raise RuntimeError("Triton autodiff activity/signature mismatch: "
+                           f"got {len(arg_activities)} activities for {len(signature)} TTIR arguments")
+    if spec.mode == _REVERSE_MODE:
+        for ty, activity in zip(signature, arg_activities):
+            if activity != "enzyme_const" and not _is_pointer_signature_type(ty):
+                raise TypeError("Triton reverse mode supports Duplicated only for pointer arguments. "
+                                "Use Const for scalar arguments.")
+        # Differentiate the TTIR entry directly. The call wrapper supports forward mode only.
+        diff_name = _derivative_func_name(spec.mode, entry_name)
+        pass_arg = f"infn={entry_name} outfn={diff_name} argTys={','.join(arg_activities)} mode={spec.mode}"
+        return ttir, pass_arg
+
     stablehlo_types = [_stablehlo_type(ty, ttir, spec.tensor_shape) for ty in signature]
     pointer_arg_indices = [idx for idx, ty in enumerate(signature) if _is_pointer_signature_type(ty)]
     if not pointer_arg_indices:
@@ -158,11 +158,10 @@ def _build_enzyme_module(
     if len(result_types) == 1:
         result_refs = "%0"
 
-    aliases = ", ".join(
-        "#stablehlo.output_operand_alias<"
-        f"output_tuple_indices = [{result_idx}], "
-        f"operand_index = {operand_idx}, operand_tuple_indices = []>"
-        for result_idx, operand_idx in enumerate(pointer_arg_indices))
+    aliases = ", ".join("#stablehlo.output_operand_alias<"
+                        f"output_tuple_indices = [{result_idx}], "
+                        f"operand_index = {operand_idx}, operand_tuple_indices = []>"
+                        for result_idx, operand_idx in enumerate(pointer_arg_indices))
 
     body = _module_body(ttir)
     wrapper = f"""module {{
@@ -220,6 +219,8 @@ def _make_public(func_text: str) -> str:
 def _derivative_func_name(mode: str, entry_name: str) -> str:
     if mode == _FORWARD_MODE:
         return f"fwddiffe{entry_name}"
+    if mode == _REVERSE_MODE:
+        return f"revdiffe{entry_name}"
     raise ValueError(f"Unsupported Triton autodiff mode {mode!r}")
 
 
@@ -239,12 +240,14 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
     try:
         arg_activities = tuple(activity_by_name[name] for name in spec.runtime_arg_names)
     except KeyError as exc:
-        raise RuntimeError(f"Missing Triton fwddiff activity for kernel argument {exc.args[0]!r}") from exc
+        raise RuntimeError(f"Missing Triton autodiff activity for kernel argument {exc.args[0]!r}") from exc
     wrapper, pass_arg = _build_enzyme_module(ttir, entry_name, signature, spec, arg_activities)
     if spec.keep_temps:
         _write_temp_mlir(wrapper, "triton-enzyme-in-")
     enzyme_call = _load_enzyme()
     pipeline = f"enzyme-wrap{{{pass_arg}}},canonicalize"
+    if spec.mode == _REVERSE_MODE:
+        pipeline += ",remove-unnecessary-enzyme-ops,canonicalize"
     try:
         _, output = enzyme_call.run_pass_pipeline([], wrapper, pipeline)
     except ValueError as exc:
@@ -260,7 +263,7 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
         parsed = ir.parse_mlir_module(out_path, mod.context)
         parsed.context = mod.context
         if not parsed.verify():
-            raise RuntimeError("fwddiff produced invalid TTIR")
+            raise RuntimeError("Triton autodiff produced invalid TTIR")
         return parsed
     finally:
         if not spec.keep_temps:
@@ -273,8 +276,7 @@ def _pipeline_cache_key(spec: _DiffSpec) -> tuple[str, str]:
     return key, hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
-def _compose_pipeline_hook(previous_hook: knobs.PipelineStagesHook | None,
-                           spec: _DiffSpec) -> knobs.PipelineStagesHook:
+def _compose_pipeline_hook(previous_hook: knobs.PipelineStagesHook | None, spec: _DiffSpec) -> knobs.PipelineStagesHook:
 
     def autodiff_stages_hook(
         self: object | None = None,
@@ -330,14 +332,12 @@ def _flatten_arg(arg: Any, configured_activity: str | None) -> tuple[Any, tuple[
     if configured_activity == "enzyme_const":
         return arg, (arg, ), "enzyme_const"
     if configured_activity == "enzyme_dup":
-        raise TypeError(
-            "Active Triton autodiff arguments must be wrapped as "
-            "triton.experimental.Duplicated(primal, tangent)")
+        raise TypeError("Active Triton autodiff arguments must be wrapped as "
+                        "triton.experimental.Duplicated(primal, derivative)")
 
     if hasattr(arg, "data_ptr") and hasattr(arg, "dtype"):
-        raise TypeError(
-            "Tensor arguments to triton.experimental.fwddiff must be wrapped as "
-            "triton.experimental.Duplicated(primal, tangent)")
+        raise TypeError("Tensor arguments to Triton autodiff must be wrapped as "
+                        "triton.experimental.Duplicated(primal, derivative) or triton.experimental.Const(value)")
     return arg, (arg, ), "enzyme_const"
 
 
@@ -370,7 +370,10 @@ class _AutodiffKernel:
     def __init__(self, kernel, *, mode: str, arg_activities: Iterable[str | None] | None,
                  tensor_shape: int | Sequence[int] | None, keep_temps: bool):
         self._kernel = kernel
-        self._mode = _normalize_mode(mode)
+        if mode not in (_FORWARD_MODE, _REVERSE_MODE):
+            raise ValueError(f"Unsupported Triton autodiff mode {mode!r}. "
+                             "Use 'ForwardMode' or 'ReverseModeCombined'.")
+        self._mode = mode
         self._configured_arg_activities = _normalize_activities(arg_activities)
         if isinstance(tensor_shape, int):
             self._tensor_shape = (tensor_shape, )
@@ -392,8 +395,8 @@ class _AutodiffKernel:
         self,
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
-    ) -> tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], dict[str, tuple[Any, ...]], tuple[str, ...],
-               tuple[str, ...]]:
+    ) -> tuple[tuple[Any, ...], dict[str, Any], dict[str, Any], dict[str, tuple[Any, ...]], tuple[str, ...], tuple[
+            str, ...]]:
         if self._configured_arg_activities is not None and len(self._configured_arg_activities) != len(args):
             raise TypeError(
                 f"Expected {len(self._configured_arg_activities)} runtime arguments for configured autodiff "
@@ -444,9 +447,8 @@ class _AutodiffKernel:
                 expanded.append(ty)
         runtime_arg_names = tuple(runtime_arg_names)
         if runtime_arg_names != expected_runtime_arg_names:
-            raise RuntimeError(
-                "Triton fwddiff specialization mismatch between the JIT binder and compiled source: "
-                f"{expected_runtime_arg_names!r} != {runtime_arg_names!r}")
+            raise RuntimeError("Triton autodiff specialization mismatch between the JIT binder and compiled source: "
+                               f"{expected_runtime_arg_names!r} != {runtime_arg_names!r}")
         kernel.src.signature = {idx: ty for idx, ty in enumerate(expanded)}
         return runtime_arg_names
 
@@ -461,8 +463,13 @@ class _AutodiffKernel:
         # constexpr values are omitted from both Enzyme activities and launch arguments.
         *_, binder = self._kernel.device_caches[device]
         _, specialization, _ = binder(*compile_args, **compile_kwargs)
-        runtime_arg_names = tuple(
-            name for name, specialized in zip(arg_names, specialization) if specialized[0] != "constexpr")
+        runtime_arg_names = tuple(name for name, specialized in zip(arg_names, specialization)
+                                  if specialized[0] != "constexpr")
+        if self._mode == _REVERSE_MODE:
+            for name, activity in zip(arg_names, activities):
+                if activity != "enzyme_const" and name not in runtime_arg_names:
+                    raise TypeError(
+                        f"Triton reverse mode cannot differentiate constexpr argument {name!r}. Use Const instead.")
         spec = _DiffSpec(
             mode=self._mode,
             arg_names=arg_names,
@@ -507,8 +514,18 @@ class _AutodiffKernel:
         return lambda *args, **kwargs: self.run(*args, grid=grid, warmup=False, **kwargs)
 
 
-def autodiff(kernel=None, *, mode: str = "forward", arg_activities: Iterable[str | None] | None = None,
+def autodiff(kernel=None, *, mode: str = _REVERSE_MODE, arg_activities: Iterable[str | None] | None = None,
              tensor_shape: int | Sequence[int] | None = None, keep_temps: bool = False):
+    """Differentiate a kernel. The default mode is ``ReverseModeCombined``.
+
+    Use this function as a decorator or pass a JIT kernel directly.
+    The mode must be ``ForwardMode`` or ``ReverseModeCombined``.
+    In reverse mode, use ``Duplicated(primal, gradient)`` for each active pointer.
+    Initialize input gradients to zero unless you want to add to existing gradients.
+    Set output gradients to the required seeds before each launch.
+    The kernel adds input gradients and clears output seeds at stored addresses.
+    Use ``Const(value)`` for scalar arguments and inactive pointers in reverse mode.
+    """
 
     def decorator(fn):
         return _AutodiffKernel(
@@ -525,4 +542,9 @@ def autodiff(kernel=None, *, mode: str = "forward", arg_activities: Iterable[str
 
 
 def fwddiff(kernel=None, **kwargs):
-    return autodiff(kernel, mode="forward", **kwargs)
+    """Differentiate a kernel in ``ForwardMode``.
+
+    Use this function as a decorator or pass a JIT kernel directly.
+    Use ``Duplicated(primal, tangent)`` for each active argument.
+    """
+    return autodiff(kernel, mode=_FORWARD_MODE, **kwargs)
