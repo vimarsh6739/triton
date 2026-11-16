@@ -4,11 +4,26 @@ import triton.language as tl
 import os
 import pathlib
 import hashlib
+import importlib
+from dataclasses import replace
+from types import SimpleNamespace
 import pytest
 import torch
 from triton._internal_testing import is_cuda
 from triton._instrumentation import instrument, is_enabled, register_instrumentation, unregister_instrumentation
-from triton.experimental.autodiff import Const, Duplicated, _load_enzyme, fwddiff
+from triton.experimental.autodiff import (
+    Const,
+    Duplicated,
+    _AutodiffKernel,
+    _DiffSpec,
+    _autodiff_pipeline,
+    _build_enzyme_module,
+    _enzyme_version,
+    _load_enzyme,
+    _pipeline_cache_key,
+    autodiff,
+    fwddiff,
+)
 
 
 def test_instrumentation_mode():
@@ -46,7 +61,208 @@ def _has_enzyme():
 
 def test_fwddiff_is_experimental_api():
     assert not hasattr(triton, "fwddiff")
+    assert not hasattr(triton, "revdiff")
     assert not hasattr(triton, "autodiff")
+    assert not hasattr(triton.experimental, "revdiff")
+    assert triton.experimental.autodiff is autodiff
+    assert triton.experimental.fwddiff is fwddiff
+
+
+@pytest.mark.parametrize("decorate, expected_mode, tensor_shape", [
+    (autodiff, "ReverseModeCombined", None),
+    (autodiff(), "ReverseModeCombined", None),
+    (fwddiff, "ForwardMode", None),
+    (fwddiff(tensor_shape=128), "ForwardMode", (128, )),
+])
+def test_autodiff_decorators(decorate, expected_mode, tensor_shape):
+
+    @decorate
+    @triton.jit
+    def kernel(x):
+        pass
+
+    assert kernel._mode == expected_mode
+    assert kernel._tensor_shape == tensor_shape
+    assert isinstance(kernel.primal, triton.JITFunction)
+
+
+@pytest.mark.parametrize("mode", ["forward", "fwd", "reverse", "rev", "ReverseMode", "invalid"])
+def test_autodiff_rejects_mode_aliases(mode):
+
+    @triton.jit
+    def kernel(x):
+        pass
+
+    with pytest.raises(ValueError, match="Use 'ForwardMode' or 'ReverseModeCombined'"):
+        autodiff(kernel, mode=mode)
+
+
+@pytest.mark.parametrize("mode", ["ForwardMode", "ReverseModeCombined"])
+def test_autodiff_mode_and_arguments(mode):
+
+    @triton.jit
+    def kernel(x, scale, output, BLOCK: tl.constexpr):
+        pass
+
+    x, dx, output, seed = (object() for _ in range(4))
+    diff = autodiff(kernel, mode=mode)
+    assert diff.primal is kernel
+    assert diff._mode == mode
+    args, kwargs, bound, flat, names, activities = diff._flatten_args(
+        (Duplicated(x, dx), ), {"scale": Const(2.0), "output": Duplicated(output, seed), "BLOCK": 128, "num_warps": 4})
+    assert args == (x, 2.0, output, 128)
+    assert kwargs == {"num_warps": 4}
+    assert bound == {"x": x, "scale": 2.0, "output": output, "BLOCK": 128}
+    assert flat == {"x": (x, dx), "scale": (2.0, ), "output": (output, seed), "BLOCK": (128, )}
+    assert names == ("x", "scale", "output", "BLOCK")
+    assert activities == ("enzyme_dup", "enzyme_const", "enzyme_dup", "enzyme_const")
+
+
+def test_reverse_autodiff_module_and_launcher_signature():
+    spec = _DiffSpec("ReverseModeCombined", ("x", "scale", "out", "BLOCK"),
+                     ("enzyme_dup", "enzyme_const", "enzyme_dup", "enzyme_const"), ("x", "scale", "out"),
+                     "test-version", None, False)
+    ttir = "module { tt.func public @kernel(%x: !tt.ptr<f32>, %scale: f32, %out: !tt.ptr<f32>) { tt.return } }"
+    module, options = _build_enzyme_module(ttir, "kernel", ("*fp32", "fp32", "*fp32"), spec, spec.arg_activities[:3])
+    assert module == ttir
+    assert options == ("infn=kernel outfn=revdiffekernel argTys=enzyme_dup,enzyme_const,enzyme_dup "
+                       "mode=ReverseModeCombined")
+    assert _pipeline_cache_key(spec) != _pipeline_cache_key(replace(spec, mode="ForwardMode"))
+    compiled = SimpleNamespace(src=SimpleNamespace(
+        signature={"x": "*fp32", "scale": "fp32", "out": "*fp32", "BLOCK": "constexpr"}))
+    for _ in range(2):
+        names = _AutodiffKernel._patch_launcher_signature(compiled, dict(zip(spec.arg_names, spec.arg_activities)),
+                                                          spec.runtime_arg_names)
+        assert names == spec.runtime_arg_names
+        assert compiled.src.signature == {0: "*fp32", 1: "*fp32", 2: "fp32", 3: "*fp32", 4: "*fp32"}
+
+
+def test_reverse_autodiff_rejects_active_scalar():
+    spec = _DiffSpec("ReverseModeCombined", ("x", ), ("enzyme_dup", ), ("x", ), "test-version", None, False)
+    with pytest.raises(TypeError, match="Use Const for scalar arguments"):
+        _build_enzyme_module("", "kernel", ("fp32", ), spec, spec.arg_activities)
+    with pytest.raises(RuntimeError, match="activity/signature mismatch"):
+        _build_enzyme_module("", "kernel", ("*fp32", ), spec, ())
+
+
+def test_reverse_autodiff_launch_arguments(monkeypatch, fresh_knobs):
+    ad = importlib.import_module("triton.experimental.autodiff")
+    from triton.runtime.driver import driver
+
+    @triton.jit
+    def kernel(x, scale, output, stride, BLOCK: tl.constexpr):
+        pass
+
+    x, dx, output, seed = (object() for _ in range(4))
+    launches = []
+    compiled = SimpleNamespace(
+        src=SimpleNamespace(
+            signature={"x": "*fp32", "scale": "fp32", "output": "*fp32", "stride": "constexpr", "BLOCK": "constexpr"}),
+        function="function", packed_metadata="metadata", launch_metadata=lambda *args: None,
+        run=lambda *args: launches.append(args))
+    binder = lambda *args, **kwargs: (None, [("*fp32", None), ("fp32", None), ("*fp32", None), ("constexpr", 1),
+                                             ("constexpr", 128)], None)
+    monkeypatch.setattr(kernel, "device_caches", {0: (binder, )})
+    monkeypatch.setattr(driver, "_active",
+                        SimpleNamespace(get_current_device=lambda: 0, get_current_stream=lambda device: 42))
+    monkeypatch.setattr(ad, "_load_enzyme", lambda: None)
+    monkeypatch.setattr(ad, "_enzyme_version", lambda: "test-version")
+    original_hook = fresh_knobs.runtime.add_stages_inspection_hook
+
+    def compile_kernel(*args, **kwargs):
+        assert args == (x, 2.0, output, 1, 128)
+        assert kwargs["warmup"]
+        assert fresh_knobs.runtime.add_stages_inspection_hook is not original_hook
+        return compiled
+
+    monkeypatch.setattr(kernel, "run", compile_kernel)
+    diff = autodiff(kernel)
+    grid = lambda meta: (meta["BLOCK"] // 128, )
+    args = (Duplicated(x, dx), Const(2.0), Duplicated(output, seed), Const(1))
+    assert diff.warmup(*args, grid=grid, BLOCK=128) is compiled
+    assert not launches
+    for _ in range(2):
+        diff[grid](*args, BLOCK=128)
+        assert launches[-1][:6] == (1, 1, 1, 42, "function", "metadata")
+        assert launches[-1][9:] == (x, dx, 2.0, output, seed)
+        assert fresh_knobs.runtime.add_stages_inspection_hook is original_hook
+    with pytest.raises(TypeError, match="cannot differentiate constexpr argument 'stride'"):
+        diff[grid](*args[:3], Duplicated(1, 1), BLOCK=128)
+
+
+@pytest.mark.skipif(not _has_enzyme(), reason="Enzyme-JAX is required for Triton autodiff")
+@pytest.mark.parametrize("mode", ["ForwardMode", "ReverseModeCombined"])
+def test_autodiff_compile(mode, fresh_triton_cache):
+    from triton.backends.compiler import GPUTarget
+    from triton.compiler import ASTSource
+
+    @triton.jit
+    def scaled_square(x, scale, output, n_elements, BLOCK: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offsets < n_elements
+        value = tl.load(x + offsets, mask, other=0)
+        tl.store(output + offsets, scale * value * value, mask)
+
+    diff = autodiff(scaled_square) if mode == "ReverseModeCombined" else fwddiff(scaled_square)
+    spec = _DiffSpec(diff._mode, tuple(scaled_square.arg_names),
+                     ("enzyme_dup", "enzyme_const", "enzyme_dup", "enzyme_const", "enzyme_const"),
+                     ("x", "scale", "output", "n_elements"), _enzyme_version(), None, False)
+    source = ASTSource(scaled_square, signature={"x": "*fp32", "scale": "fp32", "output": "*fp32", "n_elements": "i32"},
+                       constexprs={"BLOCK": 128})
+    with _autodiff_pipeline(spec):
+        compiled = triton.compile(source, target=GPUTarget("cuda", 80, 32))
+    ttir = compiled.asm["ttir"]
+    if mode == "ReverseModeCombined":
+        assert "tt.func public @revdiffescaled_square" in ttir
+        assert "tt.atomic_rmw fadd" in ttir
+        assert "atom.global" in compiled.asm["ptx"] or "red.global" in compiled.asm["ptx"]
+    else:
+        assert "tt.func public @fwddiffescaled_square" in ttir
+    assert ttir.count("tt.store") == 2
+    assert "enzyme." not in ttir
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA is required")
+@pytest.mark.skipif(not _has_enzyme(), reason="Enzyme-JAX is required for Triton autodiff")
+@pytest.mark.parametrize("constant_y", [False, True])
+def test_reverse_autodiff_product(constant_y, fresh_triton_cache):
+    device = triton.runtime.driver.active.get_active_torch_device()
+
+    @triton.jit
+    def product(x, y, output, stride, n_elements, BLOCK: tl.constexpr):
+        offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+        mask = offsets < n_elements
+        a = tl.load(x + offsets * stride, mask, other=0)
+        b = tl.load(y + offsets * stride, mask, other=0)
+        tl.store(output + offsets, a * b, mask)
+
+    n_elements = 259
+    x = torch.rand(384, device=device)
+    y = torch.rand_like(x)
+    dx = torch.full_like(x, 2.0)
+    dy = torch.full_like(y, 3.0)
+    output = torch.full_like(x, -1.0)
+    seed = torch.rand_like(x)
+    doutput = seed.clone()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK"]), )
+    diff = autodiff(product)
+    args = (Duplicated(x, dx), Const(y) if constant_y else Duplicated(y, dy), Duplicated(output, doutput), Const(1))
+    compiled = diff.warmup(*args, grid=grid, n_elements=n_elements, BLOCK=128)
+    assert "revdiffeproduct" in compiled.asm["ttir"]
+    for launch in range(1, 3):
+        doutput.copy_(seed)
+        diff[grid](*args, n_elements=n_elements, BLOCK=128)
+        torch.testing.assert_close(output[:n_elements], (x * y)[:n_elements])
+        torch.testing.assert_close(dx[:n_elements], (2.0 + launch * y * seed)[:n_elements])
+        if constant_y:
+            torch.testing.assert_close(dy, torch.full_like(dy, 3.0))
+        else:
+            torch.testing.assert_close(dy[:n_elements], (3.0 + launch * x * seed)[:n_elements])
+        torch.testing.assert_close(doutput[:n_elements], torch.zeros_like(doutput[:n_elements]))
+        torch.testing.assert_close(doutput[n_elements:], seed[n_elements:])
+        torch.testing.assert_close(dx[n_elements:], torch.full_like(dx[n_elements:], 2.0))
+        torch.testing.assert_close(dy[n_elements:], torch.full_like(dy[n_elements:], 3.0))
+        torch.testing.assert_close(output[n_elements:], torch.full_like(output[n_elements:], -1.0))
 
 
 @pytest.mark.skipif(not is_cuda(), reason="only currently tested on CUDA")

@@ -5,8 +5,9 @@ triton.experimental.autodiff
 
 .. warning::
 
-   This API is experimental. It currently supports forward-mode differentiation
-   of simple Triton kernels through the Enzyme-JAX Python bindings.
+   This API is experimental. It supports forward and combined reverse modes
+   through the Enzyme-JAX Python bindings. The available operations depend on
+   the Enzyme-JAX build.
 
 ``fwddiff`` adapts a ``triton.jit`` kernel at launch time. It returns a
 callable kernel object that uses Triton's normal ``kernel[grid](...)`` launch
@@ -57,6 +58,61 @@ To launch the original primal kernel, call it directly:
 .. code-block:: python
 
    add_kernel[grid](x, y, output, output.numel(), BLOCK_SIZE=1024)
+
+Reverse mode
+------------
+
+``autodiff(kernel)`` uses ``"ReverseModeCombined"`` by default.
+It creates a kernel that computes the primal result and its reverse derivative
+in one launch. It uses the same launch syntax as ``fwddiff``.
+The only accepted modes are ``"ForwardMode"`` and ``"ReverseModeCombined"``.
+``fwddiff(kernel)`` is equivalent to ``autodiff(kernel, mode="ForwardMode")``.
+
+Both functions also support decorator syntax. Put ``@autodiff`` or ``@fwddiff``
+above ``@triton.jit``. To supply options, use parentheses, for example
+``@fwddiff(tensor_shape=(1024,))``. The decorated object exposes the original
+JIT kernel through its ``primal`` property.
+
+Use ``Duplicated(primal, gradient)`` for each active pointer argument.
+The derivative kernel adds input gradients to the supplied buffers.
+Initialize these buffers to zero unless you want to add to existing gradients.
+Set each output gradient buffer to the required seed before each launch.
+The derivative kernel reads these seeds and clears them at stored addresses.
+Masked stores leave the other seed values unchanged.
+
+Use ``Const(value)`` for inactive pointers and scalar arguments.
+Reverse mode currently supports gradients in pointer buffers only.
+It does not return scalar gradients or a separate backward kernel.
+Use separate storage for primal values and gradient buffers.
+
+For the vector-add kernel above:
+
+.. code-block:: python
+
+   from triton.experimental import autodiff
+
+   dx = torch.zeros_like(x)
+   dy = torch.zeros_like(y)
+   doutput = torch.ones_like(output)
+
+   autodiff(add_kernel)[grid](
+       Duplicated(x, dx),
+       Duplicated(y, dy),
+       Duplicated(output, doutput),
+       Const(output.numel()),
+       BLOCK_SIZE=1024,
+   )
+
+   # The kernel sets output to x + y.
+   # The kernel adds one to dx and dy, then clears doutput.
+
+Reverse mode differentiates the TTIR entry function directly.
+It does not need ``tensor_shape``. The argument remains available for forward mode.
+The Enzyme-JAX build must include the Triton reverse rules and the
+``remove-unnecessary-enzyme-ops`` pass. Unsupported operations cause a compilation error.
+
+Installation
+------------
 
 Install an Enzyme-JAX wheel built with Triton support in the same Python
 environment as Triton:
