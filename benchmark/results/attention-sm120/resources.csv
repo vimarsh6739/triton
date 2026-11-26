@@ -1,0 +1,5 @@
+case,causal,n,d,batch,heads,seed,prefix_seed,registers,local_bytes_thread,shared_bytes_cta,tt_dots,tt_atomics,scf_loops
+stream-unrolled,True,64,64,2,8,23,False,255,0,12288,12,5,0
+stream-unrolled,True,113,64,2,8,23,False,255,736,12288,24,9,0
+stream-unrolled,True,128,64,2,8,23,False,255,744,12288,24,9,0
+stream-unrolled,True,257,64,2,8,23,False,255,2576,12288,54,19,0
