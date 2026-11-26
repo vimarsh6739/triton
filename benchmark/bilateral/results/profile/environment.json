@@ -1,0 +1,12 @@
+{
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "uuid": "87c39f5e-618e-9ab7-4cb9-1491aac9cbc3",
+  "torch": "2.12.0a0+git0d62256",
+  "cuda": "12.9",
+  "seed": 17,
+  "warmup_calls": 3,
+  "traces": 3,
+  "height": 2048,
+  "width": 2048,
+  "activations_sha256": "171855d3284f7921b86b1b770ca5a227c6a43c8291c8b1535e347baf48222f40"
+}

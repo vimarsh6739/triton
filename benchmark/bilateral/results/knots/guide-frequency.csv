@@ -1,0 +1,5 @@
+guide_source,height,width,pixels,exact_center,one_ulp_from_center,fp32_fp64_active_disagreements
+luminance,1024,1024,1048576,0,0,0
+trained,1024,1024,1048576,0,0,0
+luminance,2048,2048,4194304,0,0,0
+trained,2048,2048,4194304,3,0,3

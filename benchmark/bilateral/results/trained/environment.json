@@ -1,0 +1,38 @@
+{
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_uuid": "d0f2fbdc-1170-600c-8c09-d2cb7db6f8ad",
+  "torch": "2.12.0a0+git0d62256",
+  "cuda": "12.9",
+  "triton": "3.9.0",
+  "enzyme_sha256": "72451477afb2a5f4cda29409d3e17fa9eb667d62c401fb640f23e9d3cbc2e852",
+  "input_sha256": {
+    "photo": "7c9159b59423080504fdc7c4a061e20a240abcee0f4645348d11c88a4c678375",
+    "1024": "c47839fe95a06601cba5b79b1f1848675893a4a5368cf76bdea92d3bd06af75b",
+    "2048": "171855d3284f7921b86b1b770ca5a227c6a43c8291c8b1535e347baf48222f40"
+  },
+  "methods": [
+    "torch",
+    "compiled",
+    "cuda_strict",
+    "fused_cuda",
+    "warp_cuda",
+    "ttir"
+  ],
+  "seeds": [
+    17,
+    43
+  ],
+  "sizes": [
+    "1024x1024",
+    "2048x2048"
+  ],
+  "batch": 1,
+  "grid": [
+    16,
+    16,
+    8
+  ],
+  "rounds": 25,
+  "frontend_commit": "03bead828c7dbf4c6b478449eb27fcab6c8bc352",
+  "driver": "575.57.08"
+}

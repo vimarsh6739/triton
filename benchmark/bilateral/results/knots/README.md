@@ -1,0 +1,16 @@
+# The guide derivative at a bilateral depth-bin center
+
+Three pixels of the 2048 × 2048 trained HDRNet guide have the exact FP32 value 0.3125. At these pixels, the derivative of every slice weight with respect to the guide is zero in the FP64 specification. The original CUDA derivative returned −8.57 to 19.15 on the measured cotangents. Changing the interpolation support test made all six gradients zero in generated TTIR and both handwritten scatter kernels, across two cotangents. Across all 4,194,304 pixels and both seeds, historical CUDA had precisely three guide errors per seed above 1% of the peak FP64 gradient, all at these centers. The corrected methods had zero. Outside those centers the maximum guide error divided by the peak was at most 6.06 × 10⁻⁷ across all methods. The 1024 × 1024 trained guide and both luminance controls contain zero exact centers. [Guide frequencies](guide-frequency.csv) · [Pixel coordinates and gradients](trained-pixels.csv) · [Whole-image errors](trained-outliers.csv)
+
+The depth weight is max(0, 1 − sqrt(d² + 10⁻⁸)), where d is the distance to a neighboring bin center. At a bin center, d is zero for the current bin and one in magnitude for the other bin. The current bin has zero slope. The other bin is outside the support in real arithmetic. FP32 rounds sqrt(1 + 10⁻⁸) to one, and the original CUDA test chooses the interior slope at equality. Reverse AD of the primal with the same comparison exposes the same issue.
+
+The corrected Triton primal compares (g − (c − 1))((c + 1) − g) to 10⁻⁸ before AD, where g is the guide in bin units and c is the bin center. The product equals 1 − d². It preserves the margin available at the immediately adjacent FP32 inputs without first rounding their distance to one. The primal still computes the square root in FP32. The handwritten scatter kernels use the same support predicate and evaluate the analytic slope. The historical CUDA control named `cuda_strict` makes its support comparison at higher precision.
+
+The probes select a grid whose bias at depth z is z + 1 and evaluate the nearest FP32 value on each side of each bin center as well as exact centers and four boundary cases. They check output, grid and RGB gradients and record the guide gradient separately. At the first center (0.0625), the original CUDA guide gradient was 16 and strict FP64 gives zero. Corrected TTIR and both scatter kernels match the FP64 guide oracle across all 28 inputs within 4 × 10⁻⁶ absolute error. Corrected native PyTorch and its compiled version give zero at the centers. On the two immediate neighbors of 0.0625, their warp to the native grid sampler still gives a guide-gradient error of about eight in this test. Neither trained guide contains any immediate neighbors. [Original FP32 branches](rounded-probes.csv) · [Current control, FP32 and FP64 per-input values](guide-probes.csv)
+
+From the operator directory, use the same installed software, source image and extracted trained tensors as the main benchmark. Add the generated historical CUDA variants to PYTHONPATH for the full control set.
+
+```sh
+python check_knots.py /path/to/input.png /tmp/bilateral-knots --trained-dir /tmp/activations \
+    --methods torch compiled cuda cuda_rgb cuda_strict fused_cuda warp_cuda ttir
+```
