@@ -14,7 +14,9 @@ For the code-simplification example, open the AdamW kernels side by side. The ge
 
 ## Code that the kernel author maintains
 
-The MovieLens example puts the complete method-specific code beside the GPU time for those exact files. Both versions share 23 lines of primal and launch code. The handwritten option adds 16 lines, including three gradient accumulations. TTIR AD adds six, including its activity annotations and launch. Both compute each training rating’s loss and accumulate gradients into the user, movie and week factor tables. The figure times the full batch of 2,048 ratings and the final 128-rating batch. Two companion figures cover AdamW and Liger-shaped GroupNorm. [MovieLens figure](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-code-comparison/benchmark/code_comparison/figures/movielens.png) · [Source, timings and reproduction](https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-code-comparison/benchmark/code_comparison)
+HDRNet’s learned bilateral color transform is the three-way comparison. The same photograph, coefficient grid and guide run through compiled PyTorch, handwritten CUDA and Triton with a generated pullback. At 4.19 MP, compiled PyTorch takes 18.09 ms in 21 lines, tuned CUDA takes 3.63 ms in 147 lines and Triton AD takes 4.10 ms in 73 lines. At 1.05 MP the generated path is fastest at 0.74 ms. Each time includes the output and all three input gradients. The draft has the learned checkpoint, original 2017 CUDA control, profiled launches, an FP64 probe for three bad guide gradients and the complete counted listings. [Figure](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-bilateral/benchmark/bilateral/results/bilateral.png) · [Raw timings and source](https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-bilateral/benchmark/bilateral)
+
+The earlier comparison covers a MovieLens loss, two AdamW derivative modes and GroupNorm. MovieLens uses 29 lines with AD and 39 by hand at similar GPU time. [Supplementary source comparisons](https://github.com/vimarsh6739/triton/pull/19)
 
 ## Downstream kernel measurements
 

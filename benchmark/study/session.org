@@ -38,6 +38,8 @@ For this store rule, the synchronized softmax, seed centering, four-warp sparse 
 | AA | Generate and measure a GroupNorm tile pullback | W, X | done |
 | AB | Use saved activations in a paired Q/K normalization pullback | X | done |
 | AC | Count and time the same handwritten and generated derivatives | B, K, AA | done |
+| AD | Compare a trained bilateral operator in PyTorch, CUDA and TTIR AD | AC, X | done |
+| AE | Check the guide derivative at measured interpolation bin centers | AD | done |
 * Running log
 - 2026-11-26. Found the reverse frontend on myfork/enzyme, the compiler rules on vim/tritonrev, and earlier Neptune work on neptune-ttir*. Started isolated worktrees. Existing org notes are in ~/org/triton/triton.txt.
 - The compiler can interpret Transform directly on TTIR. A shared projection hoisted before reverse AD reduces feature-lane arithmetic. Raw timings at width 2048 and 128 steps give 17.66 to 6.65 microseconds.
@@ -62,6 +64,8 @@ For this store rule, the synchronized softmax, seed centering, four-warp sparse 
 - At (2, 4096, 512) BF16, the generated one-tile GroupNorm took 19.84–19.94 µs versus Liger’s 28.10–28.13 µs for forward plus backward. The separately hand-tiled implementation took 18.08–18.14 µs. Eager full calls including Python took 86.84–90.75 µs for the generated tile, ahead of Liger but behind PyTorch at batch two.
 - FLA’s Q/K normalization at 128 tokens took 3.524 µs for the optimized generated path, 4.760 µs upstream and 2.968 µs for paired handwritten code. At 2,048 tokens upstream was faster. An integration run compared the attention output and all five input gradients inside chunk KDA.
 - Built matched source-and-time figures using the exact Python modules that run each workload. MovieLens uses the same loss in both methods and times full and tail batches from the official training split. GroupNorm shows the cost of recomputing statistics in a shorter pointer pullback. AdamW counts support for both derivative modes and reports their times separately. [[https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-code-comparison/benchmark/code_comparison][Figures, line-count method and original timings]]
+- Replaced the headline code comparison with the trained HDRNet bilateral slice. The 4.19 MP forward and all three gradients take 18.09 ms in compiled PyTorch (21 lines), 3.63 ms in tuned handwritten CUDA (147) and 4.10 ms with Triton AD (73). On the 1.05 MP image Triton AD is fastest at 0.74 ms. The published CUDA algorithm, with its boundary fix, takes 32.67 ms in 349 lines at 4.19 MP. The profiler attributes 92–94% of compiled PyTorch backward device activity to the native grid-sampling backward. [[https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-bilateral/benchmark/bilateral][Figure, source, FP64 checks and raw runs]]
+- At three actual trained guide pixels the original CUDA returns nonzero derivatives as large as 19.15. The FP64 derivative is zero. Changing the Triton primal's interpolation support predicate before AD corrects all three and passes adjacent-float probes. The six timings use versions passing the full-image FP64 checks.
 * Downstream candidates
 Codex owns the downstream experiments. Each candidate has an existing model caller and a handwritten backward to compare with the generated derivative.
 
