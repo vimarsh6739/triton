@@ -58,6 +58,9 @@ def hand_vjp(A, DA, B, DB, C, DC, I, J, K, target, loss, seed, N: tl.constexpr,
     tl.atomic_add(DA + ia, weight * b * c, mask, sem="relaxed")
     tl.atomic_add(DB + ib, weight * a * c, mask, sem="relaxed")
     tl.atomic_add(DC + ic, weight * a * b, mask, sem="relaxed")
+    # The output seed can be replicated across warps in the factor layout.
+    # All readers must finish before the representative store clears it.
+    tl.debug_barrier()
     tl.store(seed + obs, 0, obs < N)
 
 
