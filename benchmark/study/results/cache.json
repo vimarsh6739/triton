@@ -1,0 +1,38 @@
+{
+  "config": {
+    "target": {
+      "benchmark": "46a7e1c6f47033126a4f31f378fd3ac88efd6edf8981866cb7b60828541165ca",
+      "optimizer": "63618c7e0ab35edb93d479b5f4309af1e6696bc293a6a0bd3df0a13531ce439e",
+      "triton": "29097718a8065296571b484ac93bc7b5bf00f5317c0d58bbba5628cd0c248280",
+      "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:18:05_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0\n",
+      "torch": "2.12.0a0+git0d62256",
+      "cuda": "12.9",
+      "driver": "575.57.08",
+      "gpu": "NVIDIA GeForce RTX 5090",
+      "capability": [
+        12,
+        0
+      ]
+    },
+    "calibrate_rows": 512,
+    "warps": [
+      1,
+      4,
+      8
+    ],
+    "slots": 8,
+    "dtype": "float32",
+    "max_common_error": null,
+    "verify_repeats": 8
+  },
+  "schedules": {
+    "ForwardMode:127:e75e18d97bca76b5cd45944ab0d3f6a989988466d2239408f287d9b738dfecd3": "detach-w1",
+    "ReverseModeCombined:127:e75e18d97bca76b5cd45944ab0d3f6a989988466d2239408f287d9b738dfecd3": "detach-w1",
+    "ForwardMode:512:014846b5d14b34edfb6198f9018b863d447225ff59122e3d2f740451bd00471f": "detach-w4",
+    "ReverseModeCombined:512:014846b5d14b34edfb6198f9018b863d447225ff59122e3d2f740451bd00471f": "baseline-w1",
+    "ForwardMode:1023:df77be6a0f6058b87bd0be7c4288038cf3d4dff8dcd76f937f004304b80a2bbe": "detach-w4",
+    "ReverseModeCombined:1023:df77be6a0f6058b87bd0be7c4288038cf3d4dff8dcd76f937f004304b80a2bbe": "detach-w4",
+    "ForwardMode:4096:2bcfc772b605169686e99bc35d5b2f029fa2dddccb1d4a25b38311a8e925365f": "baseline-w8",
+    "ReverseModeCombined:4096:2bcfc772b605169686e99bc35d5b2f029fa2dddccb1d4a25b38311a8e925365f": "detach-w4"
+  }
+}
