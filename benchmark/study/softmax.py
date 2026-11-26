@@ -118,7 +118,7 @@ def measure(kernels, x, vector, mode, slots, repeats):
             yield key, trial, start.elapsed_time(end) * 1000 / slots
 
 
-def experiment(args, phase, rows, cols, mode, cache, writer):
+def experiment(args, phase, rows, cols, mode, cache, writer, checks):
     device = "cuda"
     torch.manual_seed(912 + cols + rows)
     x = torch.randn(rows, cols, device=device)
@@ -145,15 +145,22 @@ def experiment(args, phase, rows, cols, mode, cache, writer):
             if args.replay and key != cache[signature]:
                 continue
             kernel = triton.compile(str(ir), options={"num_warps": warps})
-            error = check(kernel, mode, x, vector)
+            errors = [check(kernel, mode, x, vector) for _ in range(args.verify_repeats)]
+            error = max(errors)
+            for trial, obs in enumerate(errors):
+                checks.writerow([phase, rows, cols, mode, schedule, warps, trial, obs, obs <= 3e-6])
             if error > 3e-6:
-                raise ValueError(f"{key} maximum absolute error {error:g}")
+                if args.replay:
+                    raise ValueError(f"Cached {key} failed held-out validation (max error {error:g})")
+                continue
             # Large common-mode directions expose cancellation in the JVP.
             # The reverse case uses the same vector as an output cotangent.
             common_error = check(kernel, mode, x, vector + 2**16)
             kernels[key] = kernel
             metadata[key] = [schedule, warps, reductions, kernel.n_regs, error, common_error]
 
+    if not kernels:
+        raise ValueError(f"No correct candidates for {signature}")
     samples = defaultdict(list)
     for key, trial, us in measure(kernels, x, vector, mode, args.slots, args.repeats):
         samples[key].append((trial, us))
@@ -176,13 +183,14 @@ def main():
     parser.add_argument("--holdout-rows", type=int, default=2048)
     parser.add_argument("--cols", type=int, nargs="+", default=[127, 512, 1023, 4096])
     parser.add_argument("--warps", type=int, nargs="+", default=[1, 4, 8])
+    parser.add_argument("--verify-repeats", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=11)
     parser.add_argument("--slots", type=int, default=8)
     parser.add_argument("--max-common-error", type=float, help="Also gate calibration on the large-offset seed")
     parser.add_argument("--replay", type=Path, help="Use a calibration from an earlier run")
     args = parser.parse_args()
     args.opt = args.opt.resolve()
-    if min(args.cols + args.warps + [args.repeats, args.slots, args.calibrate_rows, args.holdout_rows]) <= 0:
+    if min(args.cols + args.warps + [args.repeats, args.verify_repeats, args.slots, args.calibrate_rows, args.holdout_rows]) <= 0:
         parser.error("Rows, columns, repeats, slots and warp counts must be positive")
     if args.calibrate_rows == args.holdout_rows:
         parser.error("Calibration and holdout must use different row counts")
@@ -191,22 +199,27 @@ def main():
     cache = {}
     phases = [("calibrate", args.calibrate_rows), ("holdout", args.holdout_rows)]
     config = {"target": target, "calibrate_rows": args.calibrate_rows, "warps": args.warps,
-              "slots": args.slots, "dtype": "float32", "max_common_error": args.max_common_error}
+              "slots": args.slots, "dtype": "float32", "max_common_error": args.max_common_error,
+              "verify_repeats": args.verify_repeats}
     if args.replay:
         record = json.loads(args.replay.read_text())
         if record["config"] != config:
             raise ValueError("The saved compiler, device or calibration settings differ")
         cache = record["schedules"]
         phases = phases[1:]
-    with (args.output / "timings.csv").open("w", newline="") as handle:
+    with ((args.output / "timings.csv").open("w", newline="") as handle,
+          (args.output / "checks.csv").open("w", newline="") as validation):
+        checks = csv.writer(validation, lineterminator="\n")
+        checks.writerow(["phase", "rows", "cols", "mode", "schedule", "warps", "trial", "max_abs_error", "passed"])
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(["phase", "rows", "cols", "mode", "schedule", "warps", "reductions",
                          "registers", "max_abs_error", "common_mode_error", "selected", "trial", "us"])
         for phase, rows in phases:
             for cols in args.cols:
                 for mode in ("ForwardMode", "ReverseModeCombined"):
-                    experiment(args, phase, rows, cols, mode, cache, writer)
+                    experiment(args, phase, rows, cols, mode, cache, writer, checks)
                     handle.flush()
+                    validation.flush()
             if phase == "calibrate":
                 (args.output / "cache.json").write_text(json.dumps({"config": config, "schedules": cache}, indent=2)+"\n")
 
