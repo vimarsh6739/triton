@@ -93,8 +93,8 @@ def check_mlp(mode="generated", include_mode=False, header=True):
                              ((new.double() - ref).norm() / ref.norm()).item()])
 
 
-def run(rows, cols, dtype, scale, repeats, modes=()):
-    torch.manual_seed(173)
+def run(rows, cols, dtype, scale, repeats, modes=(), random_seed=173):
+    torch.manual_seed(random_seed)
     shape = (rows, cols)
     a, b, seed = [torch.randn(shape, device="cuda").to(dtype) for _ in range(3)]
     a64 = a.double().requires_grad_()
@@ -126,7 +126,7 @@ def run(rows, cols, dtype, scale, repeats, modes=()):
             captured[name] = tuple(t.detach() for t in evaluate(fn, x, y, seed, scale))
         graphs[name] = graph
     samples = {name: [] for name in impls}
-    rng = random.Random(173)
+    rng = random.Random(random_seed)
     for trial in range(repeats + 5):
         order = list(impls)
         rng.shuffle(order)
@@ -151,9 +151,11 @@ def run(rows, cols, dtype, scale, repeats, modes=()):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repeats", type=int, default=41)
+    parser.add_argument("--seed", type=int, default=173, help="Seed for activation data and timing order")
+    parser.add_argument("--production-only", action="store_true", help="Only the 3,072 × 12,288 BF16 case")
     parser.add_argument("--samples", help="CSV output for individual timed replays")
     parser.add_argument("--mlp", action="store_true", help="Run the upstream MLP forward and parameter pullback check")
-    parser.add_argument("--modes", nargs="+", default=[], choices=["discard", "read_seed", "overwrite", "donate"],
+    parser.add_argument("--modes", nargs="+", default=[], choices=["discard", "read_seed", "overwrite", "donate", "stable"],
                         help="SwiGLU ownership specializations to check and time alongside the baselines")
     args = parser.parse_args()
     if args.mlp:
@@ -163,10 +165,11 @@ if __name__ == "__main__":
     writer = csv.writer(sys.stdout, lineterminator="\n")
     writer.writerow(["rows", "width", "dtype", "gate", "impl", "out_rel_l2", "da_rel_l2", "db_rel_l2", "median_us"])
     timings = []
-    for rows, cols, scale in [(32, 256, 1.0), (128, 1024, 1.0), (256, 14336, 1.0),
-                              (37, 781, .625), (3072, 12288, 1.0)]:
+    cases = [(32, 256, 1.0), (128, 1024, 1.0), (256, 14336, 1.0),
+             (37, 781, .625), (3072, 12288, 1.0)]
+    for rows, cols, scale in cases[-1:] if args.production_only else cases:
         for dtype in ((torch.bfloat16,) if rows == 3072 else (torch.float32, torch.bfloat16, torch.float16)):
-            errors, samples = run(rows, cols, dtype, scale, args.repeats, args.modes)
+            errors, samples = run(rows, cols, dtype, scale, args.repeats, args.modes, args.seed)
             for name, values in samples.items():
                 case = [rows, cols, str(dtype), scale, name]
                 writer.writerow([*case, *errors[name], median(values)])

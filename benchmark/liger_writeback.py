@@ -89,12 +89,30 @@ def compiled_backward(dtype, width, scale, device, mode):
     # aligned dummy pointers. Only the specialization, not their data, is used.
     dummy = torch.empty(16, dtype=dtype, device=device)
     dup = Duplicated(dummy, dummy)
-    vjp = autodiff(kernel).warmup(dup, dup, dup, Const(width), Const(scale), width,
-                                  BLOCK_SIZE=block, num_warps=warps, grid=(1,))
     opt = os.environ["ENZYME_OPT"]
+
     def run_opt(source, *passes):
         return subprocess.check_output([opt, *passes], input=source, text=True)
-    generic = run_opt(vjp.asm["ttir"], "--strip-debuginfo", "--mlir-print-op-generic")
+
+    launch = dict(BLOCK_SIZE=block, num_warps=warps, grid=(1,))
+    if mode == "stable":
+        from liger_sigmoid import stabilize_sigmoid
+        from triton.experimental.autodiff import _find_tt_func, _make_public
+
+        primal = kernel.warmup(dummy, dummy, dummy, width, scale, width, **launch)
+        generic = run_opt(primal.asm["ttir"], "--strip-debuginfo", "--mlir-print-op-generic")
+        stable = stabilize_sigmoid(generic)
+        active = ["enzyme_dup"] * 3 + ["enzyme_const"] * (3 if swiglu._should_tile(width) else 2)
+        name = kernel.__name__
+        wrap = f"--enzyme-wrap=infn={name} outfn=revdiffe{name} argTys={','.join(active)} mode=ReverseModeCombined"
+        derivative = run_opt(stable, wrap, "--canonicalize", "--remove-unnecessary-enzyme-ops",
+                             "--canonicalize", "--strip-debuginfo")
+        vjp_ir = "module {\n" + _make_public(_find_tt_func(derivative, "revdiffe" + name)) + "\n}"
+        mode = "overwrite"
+    else:
+        vjp = autodiff(kernel).warmup(dup, dup, dup, Const(width), Const(scale), width, **launch)
+        vjp_ir = vjp.asm["ttir"]
+    generic = run_opt(vjp_ir, "--strip-debuginfo", "--mlir-print-op-generic")
     with ir.Context() as ctx:
         ctx.allow_unregistered_dialects = True
         tt.register_dialect(ctx)
@@ -104,8 +122,8 @@ def compiled_backward(dtype, width, scale, device, mode):
         canonical = run_opt(mod.operation.get_asm(print_generic_op_form=True), discard, "--canonicalize", "--cse")
     if canonical.count("tt.store ") != {"discard": 1, "read_seed": 0, "overwrite": 2, "donate": 2}[mode]:
         raise ValueError("Unexpected memory writes after specialization")
-    if (mode == "donate") != ("gpu.barrier" in canonical) and mode != "discard":
-        raise ValueError("Input donation requires all CTA readers to finish before overwrite")
+    if ("gpu.barrier" in canonical) != (mode in ("discard", "donate")):
+        raise ValueError("Unexpected synchronization after specializing the writeback")
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "liger_backward.ttir"
         path.write_text(canonical)
@@ -127,7 +145,7 @@ def backward(a, b, seed, scale, mode):
         if len(buffers) != 3:
             raise ValueError("Input donation requires distinct storage for a, b and seed")
         da, db = a, b
-    elif mode == "overwrite":
+    elif mode in ("overwrite", "stable"):
         da, db = torch.empty_like(a), torch.empty_like(b)
     elif mode in ("discard", "read_seed"):
         da, db = torch.zeros_like(a), torch.zeros_like(b)

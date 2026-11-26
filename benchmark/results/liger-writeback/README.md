@@ -31,3 +31,23 @@ python benchmark/liger_writeback_checks.py /tmp/liger-memory
 python benchmark/results/liger-writeback/plot.py
 lean benchmark/results/liger-writeback/proof/LigerAddresses.lean
 ```
+
+## Fixing the finite-input sigmoid failure
+
+The upstream forward stays unchanged. For backward, the compiler recognizes the sigmoid in the primal TTIR before asking Enzyme to differentiate it. With x ≥ 0 it uses t = exp(−x) and returns 1/(1+t). Otherwise it uses t = exp(x) and returns t/(1+t). The argument to exp is always nonpositive. At zero the first branch gives the expected SiLU derivative of 0.5. This is a real-arithmetic rewrite with different floating-point rounding.
+
+On a 16-point FP32 stress vector covering −120 to 120, the original generated input gradient was NaN for −120, −100 and −90. At −64 it had the wrong sign. The stable variant produced finite gradients everywhere. At −90 it returned −7.29272e−38 against FP64 −7.29267e−38. At −100 it returned a subnormal value. The probe checks the two gradients with absolute tolerance 1e−43 and relative tolerance 2e−5. [Signed tail results](sigmoid-tail.csv) · [Pre-AD rewrite](../../liger_sigmoid.py)
+
+All 13 activation configurations and both upstream MLP dtypes passed with the stable fresh-output variant. At the production BF16 shape the stable path and handwritten Liger had forward-plus-backward medians of 389.12 µs on both seeds (173, 907). The plain combined derivative took 811.01 and 806.91 µs in those sweeps. Precision and speed results describe these inputs and this GPU. [Sweep](stable.csv) · [Independent repeat](stable-repeat.csv) · [MLP gradients](stable-mlp.csv)
+
+The archived [primal](ir/primal.mlir), [ordinary VJP](ir/combined.mlir) and [stable writeback VJP](ir/stable.mlir) are from the production shape with source locations removed. The latter has two stores and zero atomics. The explicitly donating kernel retained one barrier in both TTIR and PTX. [IR fingerprints and resources](ir/metadata.json)
+
+The ordinary timing sweep used the reverse binding SHA-256 `72451477afb2a5f4cda29409d3e17fa9eb667d62c401fb640f23e9d3cbc2e852` and the post-AD optimizer `8875de229352c9260cdc91bb2ebc80dfe17e54417b5bd5ce4acd6868865c277f`. The stable run requires the seed-read rule and dead-output pass together in the optimizer; the tested binary SHA-256 is `463c1e2860d4e63d9d1a2ec0d93d43af898393788079f3d979384ee61daf3624`.
+
+```sh
+export ENZYME_OPT=/path/to/enzymexlamlir-discard-sync-opt
+python benchmark/liger_sigmoid_tail.py
+python benchmark/liger_swiglu.py --modes overwrite stable --samples /tmp/stable.csv
+python benchmark/liger_swiglu.py --seed 907 --production-only --modes overwrite stable
+python benchmark/liger_swiglu.py --mlp --modes stable
+```
