@@ -2,13 +2,38 @@
 * Task graph
 | ID | Work | Depends on | Status |
 |----+------+------------+--------|
-| A | Locate prior AD, Transform, proof and numerics branches | | active |
-| B | Generate and time a real ML derivative with independent references | A | ready |
-| C | Execute Transform schedules on derivative TTIR and test pass ordering | A | ready |
-| D | Connect Poseidon to primal and derivative TTIR | A | ready |
-| E | Check the semantics of a specific TTIR rewrite | A, C | ready for inventory |
-| F | Identify a target-specific winning schedule on held-out data | B, C | waiting |
-| G | Plot timings and accuracy from raw runs | B, D | waiting |
-| H | Share one reviewable branch and issue per subproject | B, C, D, E, G | waiting |
+| A | Locate prior AD, Transform, proof and numerics branches | | done |
+| B | Generate and time a real ML derivative with independent references | A | done |
+| C | Execute Transform schedules on derivative TTIR and test pass ordering | A | done |
+| D | Tune primal and derivative TTIR with Poseidon | A | done |
+| E | Check the semantics of a specific TTIR rewrite | A, C | done |
+| F | Calibrate derivative schedules and evaluate held-out shapes | B, C, I | done |
+| G | Plot timings and accuracy from raw runs | B, C, D, F, K | done |
+| H | Publish fork-only drafts and a local review index | E, G, J, L, M, N, O, P, Q, R, S, T | active |
+| I | Native pre-AD softmax rewrite and real-algebra check | A | done |
+| J | Isolate an intermittent reverse softmax error at 8 warps | I, F | done |
+| K | Differentiate a sampled three-way tensor factorization loss | A | done |
+| L | Compare AdamW AD before and after PTX inline loads appear | B | done |
+| M | Replay Transform schedules through the public Triton frontend | C | done |
+| N | Exercise Poseidon’s AD-based LLVM error profiler | D | done |
+| O | Test coverage and compare prior Triton AD work | A, L | done |
+| P | Compile the same derivative bytes for NVIDIA and AMD | C, I, K | done |
+| Q | Test schedule ordering in an input-driven sequence application | C, M | done |
+| R | Run a reverse attention kernel and check its GPU outputs | B, O | active |
+| S | Compare joint value and derivative tuning with published work | D, N | done |
+| T | Evaluate a seed-centering schedule after the softmax stress test | F, I, J | active |
 * Running log
 - 2026-11-26. Found the reverse frontend on myfork/enzyme, the compiler rules on vim/tritonrev, and earlier Neptune work on neptune-ttir*. Started isolated worktrees. Existing org notes are in ~/org/triton/triton.txt.
+- The compiler can interpret Transform directly on TTIR. A shared projection hoisted before reverse AD reduces feature-lane arithmetic. Raw timings at width 2048 and 128 steps give 17.66 to 6.65 microseconds.
+- The native softmax pass reduces five collectives to three in both modes. Applying it after AD leaves five. An unshifted Gaussian JVP passes the float64 oracle, but detaching the maximum increases error for a common offset of 65536.
+- Added J after the held-out checks caught intermittent baseline VJP errors at width 127 and eight warps. A separate 50-launch run saw failures in 47 launches. Added K for independent evidence outside LLMs and L for a literal lower-level AD comparison.
+- The public frontend accepts native passes and MLIR Transform libraries. Its cache includes schedule contents, pre/post placement, and the imported Enzyme binary. We ran the native softmax pass through both public launchers.
+- The softmax fault reproduced without Enzyme. Synchronizing the reverse seed read and clear took the failure count from 88/100 to 0/100 on the eight-warp case. All 768 correctness trials in a fresh synchronized schedule sweep passed. Two CUDA GPUs of the same model were used.
+- Sparse CP exposed the same hazard in a handwritten control. After both repairs, all 16 four-warp workloads passed. An application training with generated gradients on MovieLens gave test RMSE of 1.0503–1.0680 over three seeds.
+- On the optical digits objective, reverse AD through AdamW gave five example-weight hypergradient vectors within 2.75e-7 relative L2 of independent FP64. Six differentiated modules also compiled to 30 device binaries across two backends.
+- Poseidon experiments now separate primal, JVP and second derivative error. The checked-in Herbie answers regenerate the measured TTIR. The LLVM profiler and the earlier TTIR autodiff implementation have separate follow-up tasks.
+- The Poseidon CUDA profiler differentiated the generated JVP. On a squared-distance margin, strict tuning chose an exact cheaper expression. A looser target chose 2x and lost the constant 1. A 32-input holdout caught the error.
+- Replayed three saved kernels from an earlier TTIR autodiff compiler. Both systems passed add and dot. Enzyme passed the FP16 layer-norm input-gradient check, and the archived pullback exceeded tolerance. Seven forward tutorial kernels ran on GPU and all 14 forward/reverse IR checks passed.
+- Added Q and R to check how much of the mechanism and tutorial evidence holds on application inputs and in runtime reverse attention. Added S to bound the numerics novelty claim against prior work.
+- A 1e-5 absolute-error budget on the common-mode seed rejected every reverse softmax candidate on calibration. Added T to try centering the derivative seed using the softmax Jacobian's null direction.
+- The input-driven digit classifier reached 85.98% on the official held-out writer split. Both generated context-weight gradients matched FP64 within 9.5e-7 relative L2. Hoisting removed seven native multiplies. Both schedules took 16.256 µs on the eight real timesteps.

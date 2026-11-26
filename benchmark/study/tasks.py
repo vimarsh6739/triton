@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from graphlib import TopologicalSorter
 import json
 from pathlib import Path
+from textwrap import fill
 
 
 @dataclass(frozen=True)
@@ -41,9 +42,9 @@ def main():
     args = parser.parse_args()
     tasks = read_graph(args.log)
     if args.dot:
-        print('digraph research { rankdir=LR; node [shape=box, style=rounded, fontname="sans"];')
+        print('digraph research { rankdir=TB; graph [ranksep=0.4]; node [shape=box, style=rounded, fontname="sans"];')
         for task in tasks:
-            label = json.dumps(f"{task.id}. {task.work}\n{task.status}")
+            label = json.dumps(fill(f"{task.id}. {task.work}", width=26) + f"\n[{task.status}]")
             print(f'  "{task.id}" [label={label}];')
             for dep in task.depends_on:
                 print(f'  "{dep}" -> "{task.id}";')
