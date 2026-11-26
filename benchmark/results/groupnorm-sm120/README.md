@@ -14,6 +14,10 @@ At BF16 shape **(2, 4096, 512)** on an RTX 5090, the generated tile VJP took **1
 
 ![CUDA graph timing at two batch sizes](groupnorm.png)
 
+## Eager PyTorch wall time
+
+A second measurement runs ordinary eager forward and autograd calls on an AMD Threadripper PRO 7995WX host. At batch two, the generated tile method took **86.84–90.75 µs** per call versus **142.51–143.48 µs** for Liger. PyTorch's built-in GroupNorm took **78.74–83.60 µs**. At batch eight the three numbers were **96.40–96.87**, **145.08–148.69** and **214.39–215.91 µs** respectively. This measures steady-state throughput with Python dispatch included. Each of 15 shuffled rounds times 32 consecutive calls between device synchronizations. The CUDA graph results above separately measure GPU work. [Raw wall times](eager.csv)
+
 ## What changes
 
 The two generated paths share the same Python primal. The ordinary pointer VJP runs the public combined AD launcher during backward. It zeros the input-gradient buffer and clones the seed that the launcher consumes. The value VJP differentiates just the arithmetic on the tile and returns three gradient values. Its wrapper reads the incoming gradient, stores the fresh input gradient, and adds the two shared parameter gradients. This wrapper is specific to the contiguous group layout. It also recomputes the statistics. The handwritten control reuses the upstream forward's saved mean and reciprocal standard deviation, and uses per-channel sums for both the parameter and input gradients. [Primal, handwritten control and harness](../../groupnorm_pullback.py) · [Typed derivative and launch wrapper](../../groupnorm_values.py)
@@ -35,6 +39,7 @@ for scope in full backward; do
     python groupnorm_pullback.py --scope "$scope" --seed "$seed" --out "groupnorm-run/$scope-seed$seed.csv"
   done
 done
+python groupnorm_eager.py groupnorm-run/eager.csv
 python results/groupnorm-sm120/plot.py --samples groupnorm-run --output groupnorm-run/groupnorm.png
 ```
 
