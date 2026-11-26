@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import hashlib
+import json
 import os
 import re
 import tempfile
@@ -20,7 +21,7 @@ from typing import Any, Iterable, Sequence, cast
 
 from .. import knobs
 
-__all__ = ["Const", "Duplicated", "autodiff", "fwddiff"]
+__all__ = ["Const", "Duplicated", "TTIRTransform", "autodiff", "fwddiff"]
 
 _FORWARD_MODE = "ForwardMode"
 _REVERSE_MODE = "ReverseModeCombined"
@@ -38,6 +39,29 @@ class Const:
 
 
 @dataclass(frozen=True)
+class TTIRTransform:
+    """A self-contained MLIR Transform module with an @__transform_main sequence."""
+    module: str
+
+
+_Schedule = str | TTIRTransform | None
+
+
+@contextmanager
+def _schedule_pipeline(schedule: _Schedule):
+    if isinstance(schedule, TTIRTransform):
+        # The upstream preload pass reads the schedule from disk while it runs.
+        # The caller's module text is the cache input, independent of this path.
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".mlir") as handle:
+            handle.write(schedule.module)
+            handle.flush()
+            path = json.dumps(handle.name)
+            yield f"transform-preload-library{{transform-library-paths={path}}},transform-interpreter"
+    else:
+        yield schedule
+
+
+@dataclass(frozen=True)
 class _DiffSpec:
     mode: str
     arg_names: tuple[str, ...]
@@ -46,11 +70,13 @@ class _DiffSpec:
     enzyme_version: str
     tensor_shape: tuple[int, ...] | None
     keep_temps: bool
+    pre_ad: _Schedule = None
+    post_ad: _Schedule = None
 
     @property
     def key_material(self) -> str:
         return repr((self.mode, self.arg_names, self.arg_activities, self.runtime_arg_names, self.enzyme_version,
-                     self.tensor_shape, self.keep_temps))
+                     self.tensor_shape, self.keep_temps, self.pre_ad, self.post_ad))
 
 
 def _load_enzyme():
@@ -249,7 +275,13 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
     if spec.mode == _REVERSE_MODE:
         pipeline += ",remove-unnecessary-enzyme-ops,canonicalize"
     try:
-        _, output = enzyme_call.run_pass_pipeline([], wrapper, pipeline)
+        with _schedule_pipeline(spec.pre_ad) as pre:
+            if pre:
+                if spec.mode == _FORWARD_MODE:
+                    # Forward AD embeds the TTIR module in a StableHLO call wrapper.
+                    pre = f"enzymexla_tt_ext.module(builtin.module({pre}))"
+                pipeline = f"{pre},{pipeline}"
+            _, output = enzyme_call.run_pass_pipeline([], wrapper, pipeline)
     except ValueError as exc:
         raise RuntimeError(f"Enzyme-JAX failed while differentiating Triton TTIR:\n{exc}") from exc
 
@@ -258,6 +290,14 @@ def _differentiate_ttir_module(mod, spec: _DiffSpec):
     # Keep the location aliases used by the extracted function.
     locations = "\n".join(line for line in output.splitlines() if line.startswith("#loc"))
     diff_module = f"module {{\n{diff_func}\n}}\n{locations}\n"
+    if spec.post_ad:
+        # Run on the public derivative entry alone, in a fresh MLIR context
+        # so pre-AD and post-AD transform libraries can use the same entry name.
+        with _schedule_pipeline(spec.post_ad) as post:
+            try:
+                _, diff_module = enzyme_call.run_pass_pipeline([], diff_module, post)
+            except ValueError as exc:
+                raise RuntimeError(f"Enzyme-JAX failed while scheduling derivative TTIR:\n{exc}") from exc
     out_path = _write_temp_mlir(diff_module, "triton-enzyme-out-")
     try:
         parsed = ir.parse_mlir_module(out_path, mod.context)
@@ -368,7 +408,8 @@ def _normalize_activities(arg_activities: Iterable[str | None] | None) -> tuple[
 class _AutodiffKernel:
 
     def __init__(self, kernel, *, mode: str, arg_activities: Iterable[str | None] | None,
-                 tensor_shape: int | Sequence[int] | None, keep_temps: bool):
+                 tensor_shape: int | Sequence[int] | None, keep_temps: bool, pre_ad: _Schedule = None,
+                 post_ad: _Schedule = None):
         self._kernel = kernel
         if mode not in (_FORWARD_MODE, _REVERSE_MODE):
             raise ValueError(f"Unsupported Triton autodiff mode {mode!r}. "
@@ -382,6 +423,8 @@ class _AutodiffKernel:
         else:
             self._tensor_shape = tuple(tensor_shape)
         self._keep_temps = keep_temps
+        self._pre_ad = pre_ad
+        self._post_ad = post_ad
         functools.update_wrapper(self, kernel, updated=())  # pyright: ignore[reportArgumentType]
 
     @property
@@ -478,6 +521,8 @@ class _AutodiffKernel:
             enzyme_version=_enzyme_version(),
             tensor_shape=self._tensor_shape,
             keep_temps=self._keep_temps,
+            pre_ad=self._pre_ad,
+            post_ad=self._post_ad,
         )
 
         with _autodiff_pipeline(spec):
@@ -515,7 +560,8 @@ class _AutodiffKernel:
 
 
 def autodiff(kernel=None, *, mode: str = _REVERSE_MODE, arg_activities: Iterable[str | None] | None = None,
-             tensor_shape: int | Sequence[int] | None = None, keep_temps: bool = False):
+             tensor_shape: int | Sequence[int] | None = None, keep_temps: bool = False, pre_ad: _Schedule = None,
+             post_ad: _Schedule = None):
     """Differentiate a kernel. The default mode is ``ReverseModeCombined``.
 
     Use this function as a decorator or pass a JIT kernel directly.
@@ -525,6 +571,8 @@ def autodiff(kernel=None, *, mode: str = _REVERSE_MODE, arg_activities: Iterable
     Set output gradients to the required seeds before each launch.
     The kernel adds input gradients and clears output seeds at stored addresses.
     Use ``Const(value)`` for scalar arguments and inactive pointers in reverse mode.
+    Use ``pre_ad`` and ``post_ad`` to run an Enzyme-JAX pass pipeline (str) or
+    a Transform dialect module (TTIRTransform) on the primal or derivative TTIR.
     """
 
     def decorator(fn):
@@ -534,6 +582,8 @@ def autodiff(kernel=None, *, mode: str = _REVERSE_MODE, arg_activities: Iterable
             arg_activities=arg_activities,
             tensor_shape=tensor_shape,
             keep_temps=keep_temps,
+            pre_ad=pre_ad,
+            post_ad=post_ad,
         )
 
     if kernel is None:
