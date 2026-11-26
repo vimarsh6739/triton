@@ -12,6 +12,10 @@ The same schedule also ran inside a classifier on the official UCI Optical Digit
 
 For the code-simplification example, open the AdamW kernels side by side. The generated path maintains a six-line update and an eight-line primal kernel body. The matched handwritten controls also require a 17-line JVP, an 18-line VJP and a four-line accumulation helper. These are counts of nonblank, non-comment body lines in this implementation. Both routes compute the updated optimizer state and support nonzero initial adjoints. [AdamW kernels](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-mlbench/benchmark/adamw.py)
 
+## Code that the kernel author maintains
+
+The MovieLens example puts the complete method-specific code beside the GPU time for those exact files. Both versions share 23 lines of primal and launch code. The handwritten option adds 16 lines, including three gradient accumulations. TTIR AD adds six, including its activity annotations and launch. Both compute each training rating’s loss and accumulate gradients into the user, movie and week factor tables. The figure times the full batch of 2,048 ratings and the final 128-rating batch. Two companion figures cover AdamW and Liger-shaped GroupNorm. [MovieLens figure](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-code-comparison/benchmark/code_comparison/figures/movielens.png) · [Source, timings and reproduction](https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-code-comparison/benchmark/code_comparison)
+
 ## Downstream kernel measurements
 
 All three rows time BF16 forward and backward in a CUDA graph on RTX 5090 hardware. The model checks and eager measurements have separate scopes.
