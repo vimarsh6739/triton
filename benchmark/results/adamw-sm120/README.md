@@ -29,3 +29,16 @@ python /path/to/triton/benchmark/plot_adamw.py .
 Each sample times one kernel with CUDA event nodes in a graph. Ten graph replays warm the GPU before sampling. The same addresses are reused. Reverse shadow and seed buffers are restored on the stream before the first timing event. Tiny-kernel results include event overhead, with coarsely quantized reverse measurements. The plot shows group medians and interquartile ranges. The raw CSVs preserve individual event times, configuration, TTIR hash, registers, spills and reference error. Pass `--ir-dir PATH` to save the IR during a run.
 
 The update uses the bias corrections for step 32 and fixed AdamW hyperparameters. [AdamW paper](https://arxiv.org/abs/1711.05101)
+
+## A validation hypergradient on handwritten digits
+
+We fit a ten-class linear classifier for 31 AdamW steps. On the next update we differentiate the validation cross-entropy with respect to 128 training example weights. PyTorch computes the losses and the pullback through the minibatch gradient. Enzyme supplies the optimizer pullback from the same Triton kernel used for the primal step. An FP64 implementation differentiates the entire scalar objective independently.
+
+Across five seeded train/validation splits, the relative L2 error for the 128-component hypergradient ranged from 1.70e-7 to 2.75e-7. A centered finite difference along a random direction agreed on each split. These are tests of a one-step hypergradient. The larger timing sweeps above use synthetic optimizer states. Raw results are in [digits.csv](digits.csv). The application follows the example-weighting objective studied by [Ren et al.](https://proceedings.mlr.press/v80/ren18a.html)
+
+```sh
+curl -fLsS https://archive.ics.uci.edu/ml/machine-learning-databases/optdigits/optdigits.tra -o /tmp/optdigits.tra
+python benchmark/adamw_reweight.py /tmp/optdigits.tra --csv /tmp/digits.csv
+```
+
+The script verifies the hash of the published training split. Each run sets aside 256 of its 3,823 examples for the validation objective. [UCI Optical Recognition of Handwritten Digits](https://archive.ics.uci.edu/dataset/80/optical+recognition+of+handwritten+digits)
