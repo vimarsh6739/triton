@@ -1,0 +1,54 @@
+module {
+tt.func public @gradient(%arg0: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg1: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg2: !tt.ptr<f32> {tt.divisibility = 16 : i32}, %arg3: !tt.ptr<f32> {tt.divisibility = 16 : i32}) attributes {noinline = false} {
+    %cst = arith.constant dense<0.000000e+00> : tensor<512xf32>
+    %cst_0 = arith.constant dense<0xFF800000> : tensor<512xf32>
+    %cst_1 = arith.constant dense<512> : tensor<512xi32>
+    %c512_i32 = arith.constant 512 : i32
+    %0 = tt.get_program_id x : i32
+    %1 = tt.make_range {end = 512 : i32, start = 0 : i32} : tensor<512xi32>
+    %2 = arith.muli %0, %c512_i32 : i32
+    %3 = tt.splat %2 : i32 -> tensor<512xi32>
+    %4 = arith.addi %3, %1 : tensor<512xi32>
+    %5 = tt.splat %arg1 : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %6 = tt.splat %arg0 : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %7 = tt.addptr %5, %4 : tensor<512x!tt.ptr<f32>>, tensor<512xi32>
+    %8 = tt.addptr %6, %4 : tensor<512x!tt.ptr<f32>>, tensor<512xi32>
+    %9 = arith.cmpi slt, %1, %cst_1 : tensor<512xi32>
+    %10 = tt.load %7, %9, %cst : tensor<512x!tt.ptr<f32>>
+    %11 = tt.load %8, %9, %cst_0 : tensor<512x!tt.ptr<f32>>
+    %12 = "tt.reduce"(%11) <{axis = 0 : i32}> ({
+    ^bb0(%arg4: f32, %arg5: f32):
+      %31 = arith.maxnumf %arg4, %arg5 : f32
+      tt.reduce.return %31 : f32
+    }) : (tensor<512xf32>) -> f32
+    %13 = tt.splat %12 : f32 -> tensor<512xf32>
+    %14 = arith.subf %11, %13 : tensor<512xf32>
+    %15 = math.exp %14 fastmath<fast> : tensor<512xf32>
+    %16 = arith.mulf %10, %15 fastmath<fast> : tensor<512xf32>
+    %17 = math.exp %14 : tensor<512xf32>
+    %18 = tt.splat %arg3 : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %19 = tt.splat %arg2 : !tt.ptr<f32> -> tensor<512x!tt.ptr<f32>>
+    %20 = tt.addptr %18, %4 : tensor<512x!tt.ptr<f32>>, tensor<512xi32>
+    %21 = tt.addptr %19, %4 : tensor<512x!tt.ptr<f32>>, tensor<512xi32>
+    %22 = "tt.reduce"(%17) <{axis = 0 : i32}> ({
+    ^bb0(%arg4: f32, %arg5: f32):
+      %31 = arith.addf %arg4, %arg5 : f32
+      tt.reduce.return %31 : f32
+    }) : (tensor<512xf32>) -> f32
+    %23 = "tt.reduce"(%16) <{axis = 0 : i32}> ({
+    ^bb0(%arg4: f32, %arg5: f32):
+      %31 = arith.addf %arg4, %arg5 : f32
+      tt.reduce.return %31 : f32
+    }) : (tensor<512xf32>) -> f32
+    %24 = tt.splat %23 : f32 -> tensor<512xf32>
+    %25 = tt.splat %22 : f32 -> tensor<512xf32>
+    %26 = arith.divf %17, %25 fastmath<fast> : tensor<512xf32>
+    %27 = arith.mulf %24, %26 fastmath<fast> : tensor<512xf32>
+    %28 = arith.subf %16, %27 fastmath<fast> : tensor<512xf32>
+    %29 = arith.divf %28, %25 fastmath<fast> : tensor<512xf32>
+    %30 = arith.divf %17, %25 : tensor<512xf32>
+    tt.store %20, %29, %9 : tensor<512x!tt.ptr<f32>>
+    tt.store %21, %30, %9 : tensor<512x!tt.ptr<f32>>
+    tt.return
+  }
+}
