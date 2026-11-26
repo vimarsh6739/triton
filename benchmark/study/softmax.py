@@ -14,6 +14,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.experimental.autodiff import _find_tt_func, _make_public
+from centered_softmax import TEMPLATES, compile_tensor_derivative
 
 
 @triton.jit
@@ -38,7 +39,7 @@ def compile_derivative(opt, primal, mode, schedule, directory):
     return ir, fn.count('"tt.reduce"')
 
 
-def fingerprint(opt):
+def fingerprint(opt, center_seed):
     """Pin the measurement cache to the code generator, benchmark and device."""
     def digest(path):
         with Path(path).open("rb") as handle:
@@ -47,7 +48,7 @@ def fingerprint(opt):
     from triton.runtime.cache import triton_key
     from triton.backends.nvidia.compiler import get_ptxas_version
 
-    return {
+    target = {
         "benchmark": digest(__file__), "optimizer": digest(opt), "triton": hashlib.sha256(triton_key().encode()).hexdigest(),
         "ptxas": get_ptxas_version(), "torch": torch.__version__,
         "cuda": torch.version.cuda, "driver": torch.cuda.driver_version() if hasattr(torch.cuda, "driver_version")
@@ -55,6 +56,10 @@ def fingerprint(opt):
                                      text=True).splitlines()[0],
         "gpu": torch.cuda.get_device_name(), "capability": list(torch.cuda.get_device_capability()),
     }
+    if center_seed:
+        files = [Path(__file__).with_name("centered_softmax.py"), *sorted(TEMPLATES.glob("*.mlir.in"))]
+        target["tensor_wrapper"] = {path.name: digest(path) for path in files}
+    return target
 
 
 def check(kernel, mode, x, vector):
@@ -139,10 +144,18 @@ def experiment(args, phase, rows, cols, mode, cache, writer, checks):
     if phase != "calibrate" and signature not in cache:
         raise ValueError("No matching calibration for this TTIR and mode")
     kernels, metadata = {}, {}
-    for schedule in ("baseline", "detach"):
+    schedules = ["baseline", "detach"]
+    if args.center_seed or args.pivot_seed:
+        schedules.extend(["tensor-control", "tensor-centered"])
+    if args.pivot_seed:
+        schedules.append("tensor-pivot")
+    for schedule in schedules:
         if args.replay and not cache[signature].startswith(schedule + "-"):
             continue
-        ir, reductions = compile_derivative(args.opt, primal, mode, schedule, directory)
+        if schedule.startswith("tensor-"):
+            ir, reductions = compile_tensor_derivative(args.opt, cols, mode, schedule, directory)
+        else:
+            ir, reductions = compile_derivative(args.opt, primal, mode, schedule, directory)
         for warps in args.warps:
             key = f"{schedule}-w{warps}"
             if args.replay and key != cache[signature]:
@@ -193,6 +206,10 @@ def main():
     parser.add_argument("--repeats", type=int, default=11)
     parser.add_argument("--slots", type=int, default=8)
     parser.add_argument("--max-common-error", type=float, help="Also gate calibration on the large-offset seed")
+    parser.add_argument("--center-seed", action="store_true",
+                        help="Include tensor softmax derivatives with and without first-column seed centering")
+    parser.add_argument("--pivot-seed", action="store_true",
+                        help="Also try centering at the first valid column with the largest logit")
     parser.add_argument("--replay", type=Path, help="Use a calibration from an earlier run")
     args = parser.parse_args()
     args.opt = args.opt.resolve()
@@ -201,12 +218,14 @@ def main():
     if args.calibrate_rows == args.holdout_rows:
         parser.error("Calibration and holdout must use different row counts")
     args.output.mkdir(parents=True, exist_ok=False)
-    target = fingerprint(args.opt)
+    target = fingerprint(args.opt, args.center_seed or args.pivot_seed)
     cache = {}
     phases = [("calibrate", args.calibrate_rows), ("holdout", args.holdout_rows)]
     config = {"target": target, "calibrate_rows": args.calibrate_rows, "warps": args.warps,
               "slots": args.slots, "dtype": "float32", "max_common_error": args.max_common_error,
               "verify_repeats": args.verify_repeats}
+    if args.pivot_seed:
+        config["pivot_seed"] = True
     if args.replay:
         record = json.loads(args.replay.read_text())
         if record["config"] != config:

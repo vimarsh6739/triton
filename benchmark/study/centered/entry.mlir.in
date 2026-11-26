@@ -1,0 +1,22 @@
+// One block owns one row. The four pointer arguments match the AD launcher.
+tt.func public @gradient(%x: !tt.ptr<f32>, %dx: !tt.ptr<f32>,
+                         %y: !tt.ptr<f32>, %dy: !tt.ptr<f32>) {
+  %row = tt.get_program_id x : i32
+  %stride = arith.constant ${cols} : i32
+  %start = arith.muli %row, %stride : i32
+  %base = tt.splat %start : i32 -> ${indices}
+  %lanes = tt.make_range {start = 0 : i32, end = ${tile} : i32} : ${indices}
+  %offsets = arith.addi %base, %lanes : ${indices}
+  %limit = tt.splat %stride : i32 -> ${indices}
+  %valid = arith.cmpi slt, %lanes, %limit : ${indices}
+  %zero = arith.constant dense<0.0> : ${vector}
+  %padding = arith.constant dense<0xFF800000> : ${vector}
+${pointers}
+  %logits = tt.load %x_ptr, %valid, %padding : ${ptrs}
+  %raw_seed = tt.load %${source}_ptr, %valid, %zero : ${ptrs}
+${center}
+${differentiate}
+  tt.store %y_ptr, %probability, %valid : ${ptrs}
+${write_gradient}
+  tt.return
+}
