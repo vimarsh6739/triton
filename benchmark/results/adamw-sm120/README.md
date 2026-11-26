@@ -42,3 +42,5 @@ python benchmark/adamw_reweight.py /tmp/optdigits.tra --csv /tmp/digits.csv
 ```
 
 The script verifies the hash of the published training split. Each run sets aside 256 of its 3,823 examples for the validation objective. [UCI Optical Recognition of Handwritten Digits](https://archive.ics.uci.edu/dataset/80/optical+recognition+of+handwritten+digits)
+
+The same AdamW primal also supplies a lower-level AD comparison. The LLVM build generated a JVP for a typed-load control and stopped in type analysis on the inline-PTX load emitted by Triton. [LLVM reproducer and controls](../../llvm-ad/README.md)
