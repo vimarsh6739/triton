@@ -82,7 +82,10 @@ def measure(kernels, x, vector, mode, slots, repeats):
     # A reverse launch consumes its output seed. Each graph node gets a
     # different seed and input adjoint; restore them before starting the clock.
     rows, cols = x.shape
-    buffers = [torch.empty((slots, rows, cols), device=x.device) for _ in range(3)]
+    # The primal specializes its base pointers to 16-byte alignment.
+    stride = triton.cdiv(rows * cols, 4) * 4
+    buffers = [torch.empty((slots, stride), device=x.device)[:, :rows * cols].view(slots, rows, cols)
+               for _ in range(3)]
     dx, y, dy = buffers
     def reset():
         if mode == "ForwardMode":
@@ -150,12 +153,15 @@ def experiment(args, phase, rows, cols, mode, cache, writer, checks):
             for trial, obs in enumerate(errors):
                 checks.writerow([phase, rows, cols, mode, schedule, warps, trial, obs, obs <= 3e-6])
             if error > 3e-6:
-                if args.replay:
+                if phase == "holdout" and key == cache[signature]:
                     raise ValueError(f"Cached {key} failed held-out validation (max error {error:g})")
                 continue
             # Large common-mode directions expose cancellation in the JVP.
             # The reverse case uses the same vector as an output cotangent.
             common_error = check(kernel, mode, x, vector + 2**16)
+            if (phase == "holdout" and key == cache[signature] and args.max_common_error is not None
+                    and common_error > args.max_common_error):
+                raise ValueError(f"Cached {key} exceeds the held-out common-mode budget ({common_error:g})")
             kernels[key] = kernel
             metadata[key] = [schedule, warps, reductions, kernel.n_regs, error, common_error]
 
