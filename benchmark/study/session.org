@@ -9,7 +9,7 @@
 | E | Check the semantics of a specific TTIR rewrite | A, C | done |
 | F | Calibrate derivative schedules and evaluate held-out shapes | B, C, I | done |
 | G | Plot timings and accuracy from raw runs | B, C, D, F, K | done |
-| H | Publish fork-only drafts and a local review index | E, G, J, L, M, N, O, P, Q, R, S, T | active |
+| H | Publish fork-only drafts and a local review index | E, G, J, L, M, N, O, P, Q, R, S, T | done |
 | I | Native pre-AD softmax rewrite and real-algebra check | A | done |
 | J | Isolate an intermittent reverse softmax error at 8 warps | I, F | done |
 | K | Differentiate a sampled three-way tensor factorization loss | A | done |
@@ -19,9 +19,10 @@
 | O | Test coverage and compare prior Triton AD work | A, L | done |
 | P | Compile the same derivative bytes for NVIDIA and AMD | C, I, K | done |
 | Q | Test schedule ordering in an input-driven sequence application | C, M | done |
-| R | Run a reverse attention kernel and check its GPU outputs | B, O | active |
+| R | Run a reverse attention kernel and check its GPU outputs | B, O, U | done |
 | S | Compare joint value and derivative tuning with published work | D, N | done |
-| T | Evaluate a seed-centering schedule after the softmax stress test | F, I, J | active |
+| T | Evaluate a seed-centering schedule after the softmax stress test | F, I, J | done |
+| U | Expose the native Triton pass registry through Python | C, M | done |
 * Running log
 - 2026-11-26. Found the reverse frontend on myfork/enzyme, the compiler rules on vim/tritonrev, and earlier Neptune work on neptune-ttir*. Started isolated worktrees. Existing org notes are in ~/org/triton/triton.txt.
 - The compiler can interpret Transform directly on TTIR. A shared projection hoisted before reverse AD reduces feature-lane arithmetic. Raw timings at width 2048 and 128 steps give 17.66 to 6.65 microseconds.
@@ -37,3 +38,7 @@
 - Added Q and R to check how much of the mechanism and tutorial evidence holds on application inputs and in runtime reverse attention. Added S to bound the numerics novelty claim against prior work.
 - A 1e-5 absolute-error budget on the common-mode seed rejected every reverse softmax candidate on calibration. Added T to try centering the derivative seed using the softmax Jacobian's null direction.
 - The input-driven digit classifier reached 85.98% on the official held-out writer split. Both generated context-weight gradients matched FP64 within 9.5e-7 relative L2. Hoisting removed seven native multiplies. Both schedules took 16.256 µs on the eight real timesteps.
+- Centering the softmax cotangent on the first valid lane passed the common-offset budget for every held-out width. Making that first seed an outlier falsified the choice of anchor. Centering at the maximum-logit lane reduced that case's VJP error from 0.184 to 2.98e-8 at width 127. A separate dominant-lane challenge still exceeded 1e-5 at three larger widths.
+- Added U when the Transform interpreter found that the native Triton unroller was registered in the CLI only. Pre-AD unrolling then made reverse causal attention executable on odd lengths. Rerunning all 30 offline device builds from archived TTIR in another directory reproduced every machine-code text section.
+- On the final integrated compiler, the public pre-AD schedule ran the same rolled attention primal in reverse. The bounded descriptor tutorial passed output, log-sum-exp and Q/K/V checks over two seeds. Causal length 128 used two specialized query launches. The full frontend stage file passed all 28 tests.
+- Collected thirteen draft trackers across the three forks, a review guide in ~/org/triton, the raw timing and error samples, figures, compiler fingerprints and per-branch reproduction commands.
