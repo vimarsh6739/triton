@@ -1,0 +1,23 @@
+{
+  "output": "ttir-sparse-cp-results",
+  "observations": [
+    8191,
+    65539
+  ],
+  "ranks": [
+    24,
+    64
+  ],
+  "batch": 16,
+  "warps": 1,
+  "factor_rows": 2048,
+  "repeats": 25,
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "triton": "3.9.0",
+  "torch": "2.12.0a0+git0d62256",
+  "cuda": "12.9",
+  "triton_key": "29097718a8065296571b484ac93bc7b5bf00f5317c0d58bbba5628cd0c248280",
+  "enzyme_sha256": "5aa316679372a4626bcf3cce6eca358184f0d2e92a3ddcc9d43831f40091a67f",
+  "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:18:05_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0\n",
+  "driver": "575.57.08"
+}
