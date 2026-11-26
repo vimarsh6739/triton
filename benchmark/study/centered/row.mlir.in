@@ -1,0 +1,19 @@
+// A softmax row on finite logits. The caller supplies -infinity in padding.
+tt.func private @row(%x: tensor<${tile}xf32>) -> tensor<${tile}xf32> {
+  %max = "tt.reduce"(%x) <{axis = 0 : i32}> ({
+  ^bb0(%a: f32, %b: f32):
+    %v = arith.maxnumf %a, %b : f32
+    tt.reduce.return %v : f32
+  }) : (tensor<${tile}xf32>) -> f32
+  %shift = tt.splat %max : f32 -> tensor<${tile}xf32>
+  %delta = arith.subf %x, %shift : tensor<${tile}xf32>
+  %exp = math.exp %delta : tensor<${tile}xf32>
+  %denom = "tt.reduce"(%exp) <{axis = 0 : i32}> ({
+  ^bb0(%a: f32, %b: f32):
+    %v = arith.addf %a, %b : f32
+    tt.reduce.return %v : f32
+  }) : (tensor<${tile}xf32>) -> f32
+  %sum = tt.splat %denom : f32 -> tensor<${tile}xf32>
+  %p = arith.divf %exp, %sum : tensor<${tile}xf32>
+  tt.return %p : tensor<${tile}xf32>
+}
