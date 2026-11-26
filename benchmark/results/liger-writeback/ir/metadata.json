@@ -1,0 +1,68 @@
+{
+  "primal": {
+    "ttir_sha256": "d7a7a498158cc7460204662cacbdc6058726af97af2a6adea9b82b87a472c648",
+    "tt_store": 1,
+    "tt_atomic": 0,
+    "gpu_barrier": 0,
+    "ptx_barrier": 0,
+    "num_regs": 34,
+    "num_spills": 0,
+    "archive_sha256": "a488e6d169310605be3b06a8099fb629b82417af114c69c9e985585c5d17770c"
+  },
+  "combined": {
+    "ttir_sha256": "b30dfe1f73b91a7ad2ac3660cad44acd5a844cbea6f5898989665d3d2c4f887d",
+    "tt_store": 2,
+    "tt_atomic": 2,
+    "gpu_barrier": 1,
+    "ptx_barrier": 1,
+    "num_regs": 64,
+    "num_spills": 0,
+    "archive_sha256": "03c528f0ddcb21e7f29fce30c3624caa3cf5918de70a5f7e1a3091fc7158a74d"
+  },
+  "discard": {
+    "ttir_sha256": "18b698d6e5087455440975031b03611178e8c2752a9de6c2fdaa321519659da1",
+    "tt_store": 1,
+    "tt_atomic": 2,
+    "gpu_barrier": 1,
+    "ptx_barrier": 1,
+    "num_regs": 40,
+    "num_spills": 0
+  },
+  "read_seed": {
+    "ttir_sha256": "a6087cd397206ddbe0278581504ff4495a6ce372011d9e433aea4345e97401ee",
+    "tt_store": 0,
+    "tt_atomic": 2,
+    "gpu_barrier": 0,
+    "ptx_barrier": 0,
+    "num_regs": 40,
+    "num_spills": 0
+  },
+  "overwrite": {
+    "ttir_sha256": "038e327cb7b10d14e0eff357ba61757a7345aae2190b6f95a8e4ae4bbd02cb14",
+    "tt_store": 2,
+    "tt_atomic": 0,
+    "gpu_barrier": 0,
+    "ptx_barrier": 0,
+    "num_regs": 40,
+    "num_spills": 0
+  },
+  "donate": {
+    "ttir_sha256": "b46f04d1bbe38117057acb36360a5251bf255899d7cfd11f11fd16b0f2bd7275",
+    "tt_store": 2,
+    "tt_atomic": 0,
+    "gpu_barrier": 1,
+    "ptx_barrier": 1,
+    "num_regs": 40,
+    "num_spills": 0
+  },
+  "stable": {
+    "ttir_sha256": "a56c0ec1cf7bb034a30024b57924cb793d3969523bfc6ed89ca9cec7439281c2",
+    "tt_store": 2,
+    "tt_atomic": 0,
+    "gpu_barrier": 0,
+    "ptx_barrier": 0,
+    "num_regs": 48,
+    "num_spills": 0,
+    "archive_sha256": "ab2f0627902149b904b6c5560abacb8dd14419c516ed9d3278aebc04121ec4ba"
+  }
+}
