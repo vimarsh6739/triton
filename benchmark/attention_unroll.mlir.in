@@ -1,0 +1,10 @@
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%root: !transform.any_op {transform.consumed}) {
+    %loops = transform.structured.match ops{["scf.for"]} in %root : (!transform.any_op) -> !transform.any_op
+    %factor = transform.param.constant @KEY_TILES@ : i32 -> !transform.param<i32>
+    transform.annotate %loops "tt.loop_unroll_factor" = %factor : !transform.any_op, !transform.param<i32>
+    %unrolled = transform.apply_registered_pass "triton-loop-unroll" to %root : (!transform.any_op) -> !transform.any_op
+    %clean = transform.apply_registered_pass "canonicalize" to %unrolled : (!transform.any_op) -> !transform.any_op
+    transform.yield
+  }
+}

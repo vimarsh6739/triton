@@ -32,3 +32,9 @@ Each script differentiates its kernel with `triton.experimental.fwddiff` and
 validates both primal and tangent outputs against a PyTorch reference. Matmul
 and attention use fixed launch configurations so fwddiff receives a
 `JITFunction` directly rather than an autotuner wrapper.
+
+## Reverse-mode attention
+
+The attention study checks output, dQ, dK and dV against FP64 PyTorch SDPA and
+measures compiled causal attention against the Flash and math backends.
+[Results and reproduction commands](results/attention-sm120/README.md)
