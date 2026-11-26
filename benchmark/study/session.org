@@ -1,4 +1,11 @@
 #+TITLE: Triton AD research log
+* Current review
+Review the ordinary-store pullback in [[https://github.com/vimarsh6739/Enzyme-JAX/pull/4/files][Enzyme-JAX #4]], commit 01e78a9cc on vim/ttir-ad-seed-read. A store's pullback reads the output cotangent and then clears it. When the layout replicates a seed across warps, one warp can clear another warp's unread value. The draft inserts a CTA barrier for a live ordinary store. The design question is whether to enforce that ordering here or after layout selection. The original eight-warp softmax failed 88/100 launches. The draft passed 100/100.
+
+Vimarsh owns the handwritten devlog in ~/org/triton/triton.txt. This file records Codex's work. On resuming, read the devlog and inspect the source branches for edits. After a refactor, carry dependent commits onto the reviewed change, rebuild downstream users and run their checks before presenting the next item. Record the old and new tips and any behavior change here. A review can end in a redesign.
+
+For this store rule, the synchronized softmax, seed centering, four-warp sparse CP, bounded attention and digit recurrence consume the Enzyme-JAX build. Rebuild the compiler and rerun those cases if the rule moves. The Git stacks are Triton #14 on #9 and Enzyme #2 on #1. Check the actual branch ancestry at each handoff.
+
 * Task graph
 | ID | Work | Depends on | Status |
 |----+------+------------+--------|
@@ -23,6 +30,9 @@
 | S | Compare joint value and derivative tuning with published work | D, N | done |
 | T | Evaluate a seed-centering schedule after the softmax stress test | F, I, J | done |
 | U | Expose the native Triton pass registry through Python | C, M | done |
+| V | Review the reverse rule for an ordinary store | J | in review |
+| W | Exercise reverse AD on Liger's existing SwiGLU | A, J | done |
+| X | Find real model callers and handwritten gradients for adoption tests | A | done |
 * Running log
 - 2026-11-26. Found the reverse frontend on myfork/enzyme, the compiler rules on vim/tritonrev, and earlier Neptune work on neptune-ttir*. Started isolated worktrees. Existing org notes are in ~/org/triton/triton.txt.
 - The compiler can interpret Transform directly on TTIR. A shared projection hoisted before reverse AD reduces feature-lane arithmetic. Raw timings at width 2048 and 128 steps give 17.66 to 6.65 microseconds.
@@ -42,3 +52,10 @@
 - Added U when the Transform interpreter found that the native Triton unroller was registered in the CLI only. Pre-AD unrolling then made reverse causal attention executable on odd lengths. Rerunning all 30 offline device builds from archived TTIR in another directory reproduced every machine-code text section.
 - On the final integrated compiler, the public pre-AD schedule ran the same rolled attention primal in reverse. The bounded descriptor tutorial passed output, log-sum-exp and Q/K/V checks over two seeds. Causal length 128 used two specialized query launches. The full frontend stage file passed all 28 tests.
 - Collected thirteen draft trackers across the three forks, a review guide in ~/org/triton, the raw timing and error samples, figures, compiler fingerprints and per-branch reproduction commands.
+- A fresh standalone replay of the store race on RTX 5090 saw 14/100 wrong launches at eight warps and 0/100 after the barrier. Both four-warp controls passed all 100. The 88/100 figure above is the generated softmax, which is a separate test.
+* Downstream candidates
+Codex owns the downstream experiments. Each candidate has an existing model caller and a handwritten backward to compare with the generated derivative.
+
+- Liger-Kernel's transformer SwiGLU uses a Triton forward and a handwritten backward. Ran the original forward through Triton AD and compared a generated PyTorch backward with Liger's autograd function. All 13 shape/dtype cases passed the FP64 checks. In LigerSwiGLUMLP itself, a [2,17,128] input and 384-wide FFN passed output, input-gradient and all three weight-gradient checks in FP32 and BF16. At 3,072 × 12,288 in BF16 the handwritten forward and backward took 389 µs and the generated route took 801 µs on an RTX 5090. Liger recycles input buffers for the gradients. Our combined reverse call allocates gradients, copies the seed and reruns the primal. These are adoption costs in the measured path. [[https://github.com/linkedin/Liger-Kernel/blob/cc29eda82744aece335c1ca4bd3ace5c9d768048/src/liger_kernel/ops/swiglu.py][Pinned upstream implementation]] · [[https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-liger/benchmark/results/liger-swiglu][Downstream trial]]
+- FLA's Kimi Delta Attention normalizes Q and K and calls a handwritten L2-normalization backward. Widths 512 and 513 exercise different kernels. The current wrapper saves the normalized output and reciprocal norm. Compare a random-seeded VJP, near-zero rows and retained activation memory against that contract. Source audited, GPU comparison pending. [[https://github.com/fla-org/flash-linear-attention/blob/6511ea3ecf7c3b390b15391e670d5bdcb657d914/fla/ops/kda/chunk.py#L195-L204][Model caller]] · [[https://github.com/fla-org/flash-linear-attention/blob/6511ea3ecf7c3b390b15391e670d5bdcb657d914/fla/modules/norm/l2norm.py][Forward and backward]]
+- Mamba-2's explicit model path uses gated RMSNorm. The handwritten backward stages shared weight-gradient sums through FP32 partials. Compare input, gate and weight gradients with both gate orders and grouped statistics. Upstream exercises FP16 activations with FP32 weights at widths 2,048 and 4,096. Source audited, GPU comparison pending. [[https://github.com/state-spaces/mamba/blob/e9594ce1c732d97440f0332fdc43170a2294dbfa/mamba_ssm/modules/mamba2.py#L262-L272][Model caller]] · [[https://github.com/state-spaces/mamba/blob/e9594ce1c732d97440f0332fdc43170a2294dbfa/mamba_ssm/ops/triton/layernorm_gated.py][Forward and backward]]
