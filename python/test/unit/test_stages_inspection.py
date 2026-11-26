@@ -87,6 +87,25 @@ def test_autodiff_decorators(decorate, expected_mode, tensor_shape):
     assert isinstance(kernel.primal, triton.JITFunction)
 
 
+def test_autodiff_fingerprints_loaded_enzyme_build(tmp_path, monkeypatch):
+    ad = importlib.import_module("triton.experimental.autodiff")
+    extension = tmp_path / "enzyme_call.so"
+    monkeypatch.setattr(ad, "_load_enzyme", lambda: SimpleNamespace(__file__=extension))
+    monkeypatch.setattr(ad, "version", lambda distribution: "0.0.10")
+    # Simulate two interpreter sessions that loaded different local builds
+    # under the same distribution version and module path.
+    ad._enzyme_version.cache_clear()
+    try:
+        extension.write_bytes(b"first build")
+        first = ad._enzyme_version()
+        extension.write_bytes(b"second build")
+        assert ad._enzyme_version() == first
+        ad._enzyme_version.cache_clear()
+        assert ad._enzyme_version() != first
+    finally:
+        ad._enzyme_version.cache_clear()
+
+
 @pytest.mark.parametrize("mode", ["forward", "fwd", "reverse", "rev", "ReverseMode", "invalid"])
 def test_autodiff_rejects_mode_aliases(mode):
 

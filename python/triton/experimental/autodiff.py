@@ -90,7 +90,11 @@ def _load_enzyme():
 
 @functools.cache
 def _enzyme_version() -> str:
-    return version("enzyme-ad")
+    # Development builds can share the wheel version. Hash the extension the
+    # interpreter actually loaded, including when it comes from a local build.
+    with Path(_load_enzyme().__file__).open("rb") as binary:
+        digest = hashlib.file_digest(binary, "sha256").hexdigest()
+    return f"{version('enzyme-ad')}:{digest}"
 
 
 def _is_pointer_signature_type(ty: str) -> bool:

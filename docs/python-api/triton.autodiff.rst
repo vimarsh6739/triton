@@ -177,5 +177,8 @@ To target particular operations, pass an MLIR Transform module.
    """)
    gradient = autodiff(kernel, pre_ad=hoist, post_ad="cse")
 
-The kernel cache includes the schedule text and its placement relative to AD.
+The kernel cache includes the schedule text, its placement relative to AD, and
+a fingerprint of the loaded Enzyme-JAX extension. Rebuilding the extension
+under the same version number creates a separate kernel entry when its
+contents change.
 Use self-contained Transform modules so the cache key describes the schedule.
