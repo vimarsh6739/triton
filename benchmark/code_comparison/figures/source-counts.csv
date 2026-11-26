@@ -1,0 +1,7 @@
+example,method,shared_lines,method_lines,total_lines,total_statements
+movielens,generated,23,6,29,26
+movielens,handwritten,23,16,39,33
+groupnorm,generated,58,13,71,60
+groupnorm,handwritten,58,29,87,77
+adamw,generated,35,13,48,45
+adamw,handwritten,35,35,70,64
