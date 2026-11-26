@@ -1,0 +1,14 @@
+#+TITLE: Triton AD research log
+* Task graph
+| ID | Work | Depends on | Status |
+|----+------+------------+--------|
+| A | Locate prior AD, Transform, proof and numerics branches | | active |
+| B | Generate and time a real ML derivative with independent references | A | ready |
+| C | Execute Transform schedules on derivative TTIR and test pass ordering | A | ready |
+| D | Connect Poseidon to primal and derivative TTIR | A | ready |
+| E | Check the semantics of a specific TTIR rewrite | A, C | ready for inventory |
+| F | Identify a target-specific winning schedule on held-out data | B, C | waiting |
+| G | Plot timings and accuracy from raw runs | B, D | waiting |
+| H | Share one reviewable branch and issue per subproject | B, C, D, E, G | waiting |
+* Running log
+- 2026-11-26. Found the reverse frontend on myfork/enzyme, the compiler rules on vim/tritonrev, and earlier Neptune work on neptune-ttir*. Started isolated worktrees. Existing org notes are in ~/org/triton/triton.txt.
