@@ -1,0 +1,26 @@
+{
+  "scope": "kernel",
+  "seeds": [
+    17,
+    43
+  ],
+  "calls": 32,
+  "rounds": 51,
+  "rank": 16,
+  "training_rows": 80000,
+  "table_rows": [
+    943,
+    1682,
+    31
+  ],
+  "archive_sha256": "50d2a982c66986937beb9ffb3aa76efe955bf3d5c6b761f4e3a7cd717c6a3229",
+  "gpu": "NVIDIA GeForce RTX 5090",
+  "gpu_uuid": "d0f2fbdc-1170-600c-8c09-d2cb7db6f8ad",
+  "torch": "2.12.0a0+git0d62256",
+  "triton": "3.9.0",
+  "cuda": "12.9",
+  "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:18:05_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0\n",
+  "enzyme_sha256": "72451477afb2a5f4cda29409d3e17fa9eb667d62c401fb640f23e9d3cbc2e852",
+  "triton_key": "29097718a8065296571b484ac93bc7b5bf00f5317c0d58bbba5628cd0c248280",
+  "driver": "575.57.08"
+}

@@ -1,0 +1,37 @@
+example,scope,batch,method,seed,samples,median_us
+movielens,Fused loss + gradients,128,generated,17,51,1.2799999676644802
+movielens,Fused loss + gradients,128,generated,43,51,1.2799999676644802
+movielens,Fused loss + gradients,128,handwritten,17,51,1.2799999676644802
+movielens,Fused loss + gradients,128,handwritten,43,51,1.2799999676644802
+movielens,Fused loss + gradients,2048,generated,17,51,1.9839999731630087
+movielens,Fused loss + gradients,2048,generated,43,51,2.047999994829297
+movielens,Fused loss + gradients,2048,handwritten,17,51,2.047999994829297
+movielens,Fused loss + gradients,2048,handwritten,43,51,2.1120000164955854
+movielens,With batch preparation,128,generated,17,51,8.604999631643295
+movielens,With batch preparation,128,generated,43,51,8.611000142991543
+movielens,With batch preparation,128,handwritten,17,51,8.608000352978706
+movielens,With batch preparation,128,handwritten,43,51,8.670000359416008
+movielens,With batch preparation,2048,generated,17,51,14.770999550819397
+movielens,With batch preparation,2048,generated,43,51,15.00099990516901
+movielens,With batch preparation,2048,handwritten,17,51,14.829999767243862
+movielens,With batch preparation,2048,handwritten,43,51,15.01999981701374
+groupnorm,Forward + backward,2,generated,51,51,26.43200010061264
+groupnorm,Forward + backward,2,generated,137,51,26.367999613285065
+groupnorm,Forward + backward,2,handwritten,51,51,16.03199914097786
+groupnorm,Forward + backward,2,handwritten,137,51,16.095999628305435
+groupnorm,Forward + backward,2,liger,51,51,28.255999088287354
+groupnorm,Forward + backward,2,liger,137,51,28.31999957561493
+groupnorm,Forward + backward,8,generated,51,51,236.54399812221527
+groupnorm,Forward + backward,8,generated,137,51,235.9360009431839
+groupnorm,Forward + backward,8,handwritten,51,51,91.90399944782257
+groupnorm,Forward + backward,8,handwritten,137,51,92.41600334644318
+groupnorm,Forward + backward,8,liger,51,51,99.84000027179718
+groupnorm,Forward + backward,8,liger,137,51,99.93600100278854
+adamw,Update + forward derivative,4194307,generated,17,41,142.17600226402283
+adamw,Update + forward derivative,4194307,generated,67,41,143.36000382900238
+adamw,Update + forward derivative,4194307,handwritten,17,41,144.48000490665436
+adamw,Update + forward derivative,4194307,handwritten,67,41,146.43199741840363
+adamw,Update + reverse derivative,4194307,generated,17,41,256.00001215934753
+adamw,Update + reverse derivative,4194307,generated,67,41,253.9519965648651
+adamw,Update + reverse derivative,4194307,handwritten,17,41,225.2800017595291
+adamw,Update + reverse derivative,4194307,handwritten,67,41,219.13599967956543
