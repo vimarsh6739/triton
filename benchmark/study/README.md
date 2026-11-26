@@ -12,6 +12,16 @@ The same schedule also ran inside a classifier on the official UCI Optical Digit
 
 For the code-simplification example, open the AdamW kernels side by side. The generated path maintains a six-line update and an eight-line primal kernel body. The matched handwritten controls also require a 17-line JVP, an 18-line VJP and a four-line accumulation helper. These are counts of nonblank, non-comment body lines in this implementation. Both routes compute the updated optimizer state and support nonzero initial adjoints. [AdamW kernels](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-mlbench/benchmark/adamw.py)
 
+## Downstream kernel measurements
+
+All three rows time BF16 forward and backward in a CUDA graph on RTX 5090 hardware. The model checks and eager measurements have separate scopes.
+
+| Kernel and workload | Upstream | Generated | What changed |
+| --- | ---: | ---: | --- |
+| Liger SwiGLU, 3,072 × 12,288 | 389.12 µs | 389.12 µs | The combined baseline took 807–811 µs. The specialized backward reads the seed and writes two fresh gradients. Explicit input donation further reduces backward allocation from 144 MiB to zero. [Memory and sigmoid ablations](https://github.com/vimarsh6739/triton/pull/17) · [Native pass](https://github.com/vimarsh6739/Enzyme-JAX/pull/6) |
+| Liger GroupNorm, (2, 4096, 512) | 28.10–28.13 µs | 19.84–19.94 µs | One group fits in a tile. Enzyme differentiates its arithmetic and the wrapper writes each input gradient once. The hand-tiled control takes 18.08–18.14 µs. [Graph and eager measurements](https://github.com/vimarsh6739/triton/pull/16) |
+| FLA Q/K normalization, 16 heads of width 128 | 4.760 / 19.516 µs | 3.524 / 22.788 µs | At 128 / 2,048 tokens, the paired derivative reuses FLA's saved output and reciprocal norm. The paired handwritten code is fastest at 128 tokens. The full KDA operator was checked for agreement at two lengths. [Benchmark and integration](https://github.com/vimarsh6739/triton/pull/18) |
+
 ## Branches to review
 
 Each link opens a draft on a personal fork. The Triton branches start at the existing AD frontend. The Enzyme-JAX branches start at `vim/tritonrev`. The LLVM Poseidon experiment stacks on the TTIR port of Enzyme PR 3703.
