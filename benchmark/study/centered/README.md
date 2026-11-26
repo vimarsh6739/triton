@@ -33,7 +33,7 @@ nodes, with cotangents restored before each trial.
 Centering qualified at all four widths in both modes. The cache chose it for
 all VJPs and for the 127-, 1023-, and 4096-column JVPs. The ordinary JVP won
 at 512 columns. Replaying all eight cached choices on another 1,536 rows gave
-worst shifted-seed error 9.31e−8. All 1,600 repeated ordinary-seed checks
+worst shifted-seed error 9.30e−8. All 1,600 repeated ordinary-seed checks
 across calibration, holdout and replay passed.
 
 There is a simple counterexample to always choosing the first column.
@@ -61,3 +61,41 @@ python centered/validate.py run run/seed-regimes.csv
 python centered/plot.py run vjp-error.png
 z3 centered/seed.smt2
 ```
+
+## Choosing the seed at the largest logit
+
+The first-column counterexample suggests using a seed with appreciable
+softmax weight. The `tensor-pivot` candidate gathers the seed at the maximum
+logit. It reuses the primal's maximum and adds one integer minimum reduction
+over the valid indices tied at that maximum. That gives a deterministic
+lowest-index tie break, including on non-power-of-two widths. The real
+identity above holds for any row constant. The only change to the AD program
+is the choice of seed passed to it.
+
+On the low-probability outlier, the pivot recovered a maximum VJP error below
+3e−8 at all four widths. We also put the outlier at the most probable column,
+setting its logit to 20 and its seed to 2²⁴. The pivot reduced the error there
+as well, but exceeded the 10⁻⁵ absolute budget for the three larger widths.
+These are 64 fresh rows per width, with all three candidates fixed to four warps.
+
+| Columns | First-column outlier, first / pivot error | Dominant-column outlier, control / first / pivot error | VJP latency, control / first / pivot (µs) |
+|---:|---:|---:|---:|
+| 127 | 0.184 / 2.98e−8 | 2.76 / 2.76 / 4.88e−6 | 3.30 / 3.25 / 3.29 |
+| 512 | 0.0863 / 1.41e−8 | 3.69 / 3.69 / 1.99e−5 | 6.91 / 6.91 / 7.17 |
+| 1023 | 0.0903 / 1.03e−8 | 4.58 / 4.58 / 4.18e−5 | 27.39 / 27.39 / 27.14 |
+| 4096 | 0.0218 / 8.13e−9 | 4.07 / 4.07 / 1.75e−4 | 132.86 / 132.86 / 132.61 |
+
+Timings in the last column are from the original 2,048-row holdout workload.
+The GPU graphs use ordinary random seeds for timing. The shifted-seed and
+outlier columns are independent numerical evaluations. At four warps the
+pivot's JVP was 5.12 µs at 512 columns, compared with 4.35 µs for the first
+column. The original common-offset calibration chose the pivot at two of eight
+width/mode pairs. Both held-out row counts passed that budget, including
+1,984 repeated ordinary-seed checks across all phases. Choosing the fastest
+eligible candidate under that calibration does not test the outlier regime.
+
+![Worst VJP error for the same three policies](pivot-results/vjp-error.png)
+
+To reproduce this comparison, use `--pivot-seed` in the calibration and replay
+commands and pass `--pivot-seed` to `centered/validate.py`. The complete
+second run is under `pivot-results/`.

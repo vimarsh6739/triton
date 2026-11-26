@@ -1,0 +1,16 @@
+  // The same maximum is used by softmax and shared after inlining.
+  %maximum = "tt.reduce"(%logits) <{axis = 0 : i32}> ({
+  ^bb0(%a: f32, %b: f32):
+    %v = arith.maxnumf %a, %b : f32
+    tt.reduce.return %v : f32
+  }) : (${vector}) -> f32
+  %maxima = tt.splat %maximum : f32 -> ${vector}
+  %same = arith.cmpf oeq, %logits, %maxima : ${vector}
+  %eligible = arith.andi %same, %valid : tensor<${tile}xi1>
+  %indices = arith.select %eligible, %lanes, %limit : tensor<${tile}xi1>, ${indices}
+  %first_max = "tt.reduce"(%indices) <{axis = 0 : i32}> ({
+  ^bb0(%a: i32, %b: i32):
+    %v = arith.minsi %a, %b : i32
+    tt.reduce.return %v : i32
+  }) : (${indices}) -> i32
+  %index = tt.splat %first_max : i32 -> tensor<1xi32>

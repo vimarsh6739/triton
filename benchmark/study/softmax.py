@@ -145,13 +145,15 @@ def experiment(args, phase, rows, cols, mode, cache, writer, checks):
         raise ValueError("No matching calibration for this TTIR and mode")
     kernels, metadata = {}, {}
     schedules = ["baseline", "detach"]
-    if args.center_seed:
+    if args.center_seed or args.pivot_seed:
         schedules.extend(["tensor-control", "tensor-centered"])
+    if args.pivot_seed:
+        schedules.append("tensor-pivot")
     for schedule in schedules:
         if args.replay and not cache[signature].startswith(schedule + "-"):
             continue
         if schedule.startswith("tensor-"):
-            ir, reductions = compile_tensor_derivative(args.opt, cols, mode, schedule == "tensor-centered", directory)
+            ir, reductions = compile_tensor_derivative(args.opt, cols, mode, schedule, directory)
         else:
             ir, reductions = compile_derivative(args.opt, primal, mode, schedule, directory)
         for warps in args.warps:
@@ -206,6 +208,8 @@ def main():
     parser.add_argument("--max-common-error", type=float, help="Also gate calibration on the large-offset seed")
     parser.add_argument("--center-seed", action="store_true",
                         help="Include tensor softmax derivatives with and without first-column seed centering")
+    parser.add_argument("--pivot-seed", action="store_true",
+                        help="Also try centering at the first valid column with the largest logit")
     parser.add_argument("--replay", type=Path, help="Use a calibration from an earlier run")
     args = parser.parse_args()
     args.opt = args.opt.resolve()
@@ -214,12 +218,14 @@ def main():
     if args.calibrate_rows == args.holdout_rows:
         parser.error("Calibration and holdout must use different row counts")
     args.output.mkdir(parents=True, exist_ok=False)
-    target = fingerprint(args.opt, args.center_seed)
+    target = fingerprint(args.opt, args.center_seed or args.pivot_seed)
     cache = {}
     phases = [("calibrate", args.calibrate_rows), ("holdout", args.holdout_rows)]
     config = {"target": target, "calibrate_rows": args.calibrate_rows, "warps": args.warps,
               "slots": args.slots, "dtype": "float32", "max_common_error": args.max_common_error,
               "verify_repeats": args.verify_repeats}
+    if args.pivot_seed:
+        config["pivot_seed"] = True
     if args.replay:
         record = json.loads(args.replay.read_text())
         if record["config"] != config:

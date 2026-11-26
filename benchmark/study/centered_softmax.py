@@ -9,7 +9,7 @@ from triton.experimental.autodiff import _find_tt_func
 TEMPLATES = Path(__file__).with_name("centered")
 
 
-def compile_tensor_derivative(opt, cols, mode, centered, directory):
+def compile_tensor_derivative(opt, cols, mode, schedule, directory):
     """Emit and inline a typed call to Enzyme's generated function."""
     tile = 1 << (cols - 1).bit_length()
     t = f"tensor<{tile}xf32>"
@@ -30,10 +30,14 @@ def compile_tensor_derivative(opt, cols, mode, centered, directory):
 
     seed = "%raw_seed"
     center = ""
-    if centered:
-        center = f"""  %first = arith.constant dense<0> : tensor<1xi32>
-  %lane_zero = tt.gather %raw_seed[%first] {{axis = 0 : i32}} : ({t}, tensor<1xi32>) -> tensor<1xf32>
-  %anchor = tt.unsplat %lane_zero : tensor<1xf32>
+    if schedule in ("tensor-centered", "tensor-pivot"):
+        choose = "  %index = arith.constant dense<0> : tensor<1xi32>"
+        if schedule == "tensor-pivot":
+            choose = Template((TEMPLATES / "pivot.mlir.in").read_text()).substitute(
+                tile=tile, indices=indices, vector=t)
+        center = f"""{choose}
+  %pivot_seed = tt.gather %raw_seed[%index] {{axis = 0 : i32}} : ({t}, tensor<1xi32>) -> tensor<1xf32>
+  %anchor = tt.unsplat %pivot_seed : tensor<1xf32>
   %anchors = tt.splat %anchor : f32 -> {t}
   %delta = arith.subf %raw_seed, %anchors : {t}
   %direction = arith.select %valid, %delta, %zero : tensor<{tile}xi1>, {t}"""
@@ -62,7 +66,6 @@ def compile_tensor_derivative(opt, cols, mode, centered, directory):
         [opt, "--inline", "--canonicalize", "--cse", "--symbol-dce"], input=linked, text=True)
     if "tt.call" in optimized or optimized.count("tt.func ") != 1:
         raise ValueError("Expected one fully inlined softmax kernel")
-    name = "tensor-centered" if centered else "tensor-control"
-    path = directory / f"{mode}-{name}.ttir"
+    path = directory / f"{mode}-{schedule}.ttir"
     path.write_text(optimized)
     return path, optimized.count('"tt.reduce"')

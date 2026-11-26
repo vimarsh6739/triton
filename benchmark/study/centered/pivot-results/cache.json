@@ -1,0 +1,45 @@
+{
+  "config": {
+    "target": {
+      "benchmark": "21752e3d245c0ea9ecb40ad9e702f64f92b8d2dcdd953e7467dd7c9b0f2d0640",
+      "optimizer": "37c31c1d1ece67c9418814b4bec7a365cab1a78f89863cdefa8f1bf288e4eb94",
+      "triton": "6354ad6e354d39516a711afbef963c7adcb07e9b992dcf3ced4e0528071d7a02",
+      "ptxas": "ptxas: NVIDIA (R) Ptx optimizing assembler\nCopyright (c) 2005-2025 NVIDIA Corporation\nBuilt on Tue_May_27_02:18:05_PDT_2025\nCuda compilation tools, release 12.9, V12.9.86\nBuild cuda_12.9.r12.9/compiler.36037853_0\n",
+      "torch": "2.12.0a0+git0d62256",
+      "cuda": "12.9",
+      "driver": "575.57.08",
+      "gpu": "NVIDIA GeForce RTX 5090",
+      "capability": [
+        12,
+        0
+      ],
+      "tensor_wrapper": {
+        "centered_softmax.py": "7ddf21e08115c1dcfa6f728b51e28dde954ccefdc84f620a391eac9a6f1e0fb2",
+        "entry.mlir.in": "5107e40c65cb4f23e895d78464ff125ca009e1bbabc074b55c4fb99b4186ab23",
+        "pivot.mlir.in": "cae317cf93bacdc3c8f8d031d51710ced1144f87cc4eeb22e0dc65598f29853b",
+        "row.mlir.in": "c24bf842ba05eda3bf7036bc4e2052a0ff34ee197b80e7f44d12c6862d9a9d2a"
+      }
+    },
+    "calibrate_rows": 512,
+    "warps": [
+      1,
+      4,
+      8
+    ],
+    "slots": 8,
+    "dtype": "float32",
+    "max_common_error": 1e-05,
+    "verify_repeats": 8,
+    "pivot_seed": true
+  },
+  "schedules": {
+    "ForwardMode:127:e75e18d97bca76b5cd45944ab0d3f6a989988466d2239408f287d9b738dfecd3": "tensor-centered-w1",
+    "ReverseModeCombined:127:e75e18d97bca76b5cd45944ab0d3f6a989988466d2239408f287d9b738dfecd3": "tensor-pivot-w1",
+    "ForwardMode:512:014846b5d14b34edfb6198f9018b863d447225ff59122e3d2f740451bd00471f": "tensor-centered-w4",
+    "ReverseModeCombined:512:014846b5d14b34edfb6198f9018b863d447225ff59122e3d2f740451bd00471f": "tensor-centered-w1",
+    "ForwardMode:1023:df77be6a0f6058b87bd0be7c4288038cf3d4dff8dcd76f937f004304b80a2bbe": "tensor-centered-w4",
+    "ReverseModeCombined:1023:df77be6a0f6058b87bd0be7c4288038cf3d4dff8dcd76f937f004304b80a2bbe": "tensor-centered-w1",
+    "ForwardMode:4096:2bcfc772b605169686e99bc35d5b2f029fa2dddccb1d4a25b38311a8e925365f": "tensor-pivot-w8",
+    "ReverseModeCombined:4096:2bcfc772b605169686e99bc35d5b2f029fa2dddccb1d4a25b38311a8e925365f": "tensor-centered-w4"
+  }
+}
