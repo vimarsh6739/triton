@@ -110,10 +110,11 @@ def _attn_fwd(
     STAGE: tl.constexpr,
     warp_specialize: tl.constexpr,
     IS_HOPPER: tl.constexpr,
+    QUERY_BLOCK: tl.constexpr = None,
 ):
     dtype = tl.float8e5 if FP8_OUTPUT else tl.float16
     tl.static_assert(BLOCK_N <= HEAD_DIM)
-    start_m = tl.program_id(0)
+    start_m = tl.program_id(0) if QUERY_BLOCK is None else QUERY_BLOCK
     off_hz = tl.program_id(1)
     off_z = off_hz // H
     off_h = off_hz % H

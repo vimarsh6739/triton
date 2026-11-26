@@ -53,3 +53,31 @@ python benchmark/attention_vjp.py stream-rolled --n 33 --keep-temps
 python benchmark/attention_vjp.py tutorial --causal --keep-temps
 python benchmark/attention_vjp.py tutorial --no-causal --keep-temps
 ```
+
+## Scheduling the same rolled TTIR
+
+The Transform dialect schedule matches the key loop, applies its unroll factor, runs Triton's loop-unroll pass, and canonicalizes. With the same rolled pointer kernel at lengths 33 and 113, placing this schedule before AD yields a runnable VJP. Without the schedule, Triton rejects the Enzyme tape. At length 113 the post-AD hook fails while reparsing the tape's tensor-valued `memref`, before it can execute the schedule. This ordering experiment uses the Triton hooks at `03bead828c` and Enzyme-JAX's Python pass registration at `16fbcf770` together with the seed fix. The integrated binding also registers the softmax pass from `e6d5f2e71`. The schedule calls only unroll and canonicalization. The Enzyme Python extension SHA-256 is `72451477afb2a5f4cda29409d3e17fa9eb667d62c401fb640f23e9d3cbc2e852`. [Transform schedule](../../attention_unroll.mlir.in)
+
+| Descriptor tutorial, 2 batches × 8 heads × 64 features | What ran |
+| --- | --- |
+| Noncausal, 128 tokens, fixed shape only | Triton rejected the loop tape |
+| Noncausal, 128 tokens, fixed shape and pre-AD unroll | One generated launch passed output, auxiliary log-sum-exp and Q/K/V checks |
+| Causal, 128 tokens, fixed shape and pre-AD unroll | Query program ID still sets the loop bounds, and Triton rejected the remaining tape |
+| Causal, 64 or 128 tokens, fixed shape and query block, pre-AD unroll | One or two generated launches respectively passed the same checks |
+
+Across two seeds the largest relative L2 error was 0.000403 for the causal descriptor tutorial and 0.000486 for its noncausal variant. The maximum absolute log-sum-exp error was 1.02e-6. For the pointer kernel at length 113 the pre-AD schedule took 22.74–22.76 µs versus 24.79–24.81 µs for forced PyTorch Flash SDPA.
+
+The shape wrapper calls the tutorial directly. In the final row an optional integer specializes its query program ID. Each launch then owns 64 query rows and visits the keys visible to those rows. At length 128, both launches contribute to the first 64 rows of the key and value gradients. This example records full 64-row tiles because the tutorial's log-sum-exp store lacks a row mask. The masked pointer variant above handles the partial tiles. [Wrapper](../../attention_tutorial_static.py) · [Per-output errors](schedule-checks.csv) · [Per-launch resources](schedule-resources.csv) · [Timed pointer variant](schedule-timing.csv)
+
+```sh
+for seed in 23 42; do
+  for n in 64 128; do
+    python benchmark/attention_vjp.py tutorial-query-blocks --batch 2 --heads 8 --n "$n" --seed "$seed" --csv schedule-checks.csv --resources schedule-resources.csv
+  done
+  python benchmark/attention_vjp.py tutorial-pre-ad --no-causal --batch 2 --heads 8 --n 128 --seed "$seed" --csv schedule-checks.csv --resources schedule-resources.csv
+  python benchmark/attention_vjp.py stream-pre-ad --batch 2 --heads 8 --n 33 --seed "$seed" --csv schedule-checks.csv --resources schedule-resources.csv
+  python benchmark/attention_vjp.py stream-pre-ad --batch 2 --heads 8 --n 113 --seed "$seed" --csv schedule-checks.csv --resources schedule-resources.csv --timings schedule-timing.csv
+done
+```
+
+The failing controls are `tutorial-static --no-causal --n 128`, `tutorial-pre-ad --causal --n 128` and `stream-post-ad --causal --n 113`. Each is a case for the same driver.

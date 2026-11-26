@@ -1,0 +1,13 @@
+case,causal,n,d,batch,heads,seed,prefix_seed,kernel_index,registers,local_bytes_thread,shared_bytes_cta,tt_dots,tt_atomics,tt_descriptor_reductions,scf_loops
+tutorial-query-blocks,True,64,64,2,8,23,False,0,255,1856,24576,12,0,5,0
+tutorial-query-blocks,True,64,64,2,8,42,False,0,255,1856,24576,12,0,5,0
+tutorial-query-blocks,True,128,64,2,8,23,False,0,255,1856,24576,12,0,5,0
+tutorial-query-blocks,True,128,64,2,8,23,False,1,255,2912,24576,24,0,9,0
+tutorial-query-blocks,True,128,64,2,8,42,False,0,255,1856,24576,12,0,5,0
+tutorial-query-blocks,True,128,64,2,8,42,False,1,255,2912,24576,24,0,9,0
+tutorial-pre-ad,False,128,64,2,8,23,False,0,64,4064,24576,24,0,9,0
+tutorial-pre-ad,False,128,64,2,8,42,False,0,64,4064,24576,24,0,9,0
+stream-pre-ad,True,33,64,2,8,23,False,0,255,0,12288,12,5,0,0
+stream-pre-ad,True,33,64,2,8,42,False,0,255,0,12288,12,5,0,0
+stream-pre-ad,True,113,64,2,8,23,False,0,255,712,12288,24,9,0,0
+stream-pre-ad,True,113,64,2,8,42,False,0,255,712,12288,24,9,0,0
