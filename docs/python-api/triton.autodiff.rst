@@ -145,3 +145,40 @@ API reference
    fwddiff
    Duplicated
    Const
+
+Scheduling TTIR around AD
+-------------------------
+
+Both decorators accept ``pre_ad`` and ``post_ad``. The first schedule sees the
+primal TTIR after Triton's TTIR stage. The second sees the generated derivative
+kernel before Triton chooses GPU layouts. A string runs a registered Enzyme-JAX
+pass pipeline. For example, hoist a shared projection before reverse AD and
+eliminate common subexpressions afterward.
+
+.. code-block:: python
+
+   gradient = autodiff(kernel, pre_ad="loop-invariant-code-motion", post_ad="cse")
+
+To target particular operations, pass an MLIR Transform module.
+
+.. code-block:: python
+
+   from triton.experimental import TTIRTransform
+
+   hoist = TTIRTransform("""
+     module attributes {transform.with_named_sequence} {
+       transform.named_sequence @__transform_main(%root: !transform.any_op {transform.readonly}) {
+         %loops = transform.structured.match ops{["scf.for"]} in %root
+             : (!transform.any_op) -> !transform.any_op
+         transform.apply_licm to %loops : !transform.any_op
+         transform.yield
+       }
+     }
+   """)
+   gradient = autodiff(kernel, pre_ad=hoist, post_ad="cse")
+
+The kernel cache includes the schedule text, its placement relative to AD, and
+a fingerprint of the loaded Enzyme-JAX extension. Rebuilding the extension
+under the same version number creates a separate kernel entry when its
+contents change.
+Use self-contained Transform modules so the cache key describes the schedule.

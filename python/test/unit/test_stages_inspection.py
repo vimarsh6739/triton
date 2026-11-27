@@ -14,6 +14,7 @@ from triton._instrumentation import instrument, is_enabled, register_instrumenta
 from triton.experimental.autodiff import (
     Const,
     Duplicated,
+    TTIRTransform,
     _AutodiffKernel,
     _DiffSpec,
     _autodiff_pipeline,
@@ -86,6 +87,25 @@ def test_autodiff_decorators(decorate, expected_mode, tensor_shape):
     assert isinstance(kernel.primal, triton.JITFunction)
 
 
+def test_autodiff_fingerprints_loaded_enzyme_build(tmp_path, monkeypatch):
+    ad = importlib.import_module("triton.experimental.autodiff")
+    extension = tmp_path / "enzyme_call.so"
+    monkeypatch.setattr(ad, "_load_enzyme", lambda: SimpleNamespace(__file__=extension))
+    monkeypatch.setattr(ad, "version", lambda distribution: "0.0.10")
+    # Simulate two interpreter sessions that loaded different local builds
+    # under the same distribution version and module path.
+    ad._enzyme_version.cache_clear()
+    try:
+        extension.write_bytes(b"first build")
+        first = ad._enzyme_version()
+        extension.write_bytes(b"second build")
+        assert ad._enzyme_version() == first
+        ad._enzyme_version.cache_clear()
+        assert ad._enzyme_version() != first
+    finally:
+        ad._enzyme_version.cache_clear()
+
+
 @pytest.mark.parametrize("mode", ["forward", "fwd", "reverse", "rev", "ReverseMode", "invalid"])
 def test_autodiff_rejects_mode_aliases(mode):
 
@@ -128,6 +148,14 @@ def test_reverse_autodiff_module_and_launcher_signature():
     assert options == ("infn=kernel outfn=revdiffekernel argTys=enzyme_dup,enzyme_const,enzyme_dup "
                        "mode=ReverseModeCombined")
     assert _pipeline_cache_key(spec) != _pipeline_cache_key(replace(spec, mode="ForwardMode"))
+    keys = {_pipeline_cache_key(s)[1] for s in (
+        spec,
+        replace(spec, pre_ad="cse"),
+        replace(spec, post_ad="cse"),
+        replace(spec, pre_ad=TTIRTransform("first")),
+        replace(spec, pre_ad=TTIRTransform("second")),
+    )}
+    assert len(keys) == 5
     compiled = SimpleNamespace(src=SimpleNamespace(
         signature={"x": "*fp32", "scale": "fp32", "out": "*fp32", "BLOCK": "constexpr"}))
     for _ in range(2):
@@ -191,8 +219,9 @@ def test_reverse_autodiff_launch_arguments(monkeypatch, fresh_knobs):
 
 
 @pytest.mark.skipif(not _has_enzyme(), reason="Enzyme-JAX is required for Triton autodiff")
+@pytest.mark.parametrize("scheduled", [False, True])
 @pytest.mark.parametrize("mode", ["ForwardMode", "ReverseModeCombined"])
-def test_autodiff_compile(mode, fresh_triton_cache):
+def test_autodiff_compile(mode, scheduled, fresh_triton_cache):
     from triton.backends.compiler import GPUTarget
     from triton.compiler import ASTSource
 
@@ -203,10 +232,22 @@ def test_autodiff_compile(mode, fresh_triton_cache):
         value = tl.load(x + offsets, mask, other=0)
         tl.store(output + offsets, scale * value * value, mask)
 
-    diff = autodiff(scaled_square) if mode == "ReverseModeCombined" else fwddiff(scaled_square)
+    def annotate(op, attribute):
+        return TTIRTransform(f"""module attributes {{transform.with_named_sequence}} {{
+          transform.named_sequence @__transform_main(%root: !transform.any_op {{transform.readonly}}) {{
+            %ops = transform.structured.match ops{{["{op}"]}} in %root : (!transform.any_op) -> !transform.any_op
+            transform.annotate %ops "{attribute}" : !transform.any_op
+            transform.yield
+          }}
+        }}""")
+
+    pre = annotate("tt.load", "test.pre") if scheduled else None
+    post = annotate("tt.store", "test.post") if scheduled else None
+    diff = autodiff(scaled_square, mode=mode, pre_ad=pre, post_ad=post)
     spec = _DiffSpec(diff._mode, tuple(scaled_square.arg_names),
                      ("enzyme_dup", "enzyme_const", "enzyme_dup", "enzyme_const", "enzyme_const"),
-                     ("x", "scale", "output", "n_elements"), _enzyme_version(), None, False)
+                     ("x", "scale", "output", "n_elements"), _enzyme_version(), None, False, diff._pre_ad,
+                     diff._post_ad)
     source = ASTSource(scaled_square, signature={"x": "*fp32", "scale": "fp32", "output": "*fp32", "n_elements": "i32"},
                        constexprs={"BLOCK": 128})
     with _autodiff_pipeline(spec):
@@ -218,6 +259,8 @@ def test_autodiff_compile(mode, fresh_triton_cache):
         assert "atom.global" in compiled.asm["ptx"] or "red.global" in compiled.asm["ptx"]
     else:
         assert "tt.func public @fwddiffescaled_square" in ttir
+    assert ("test.pre" in ttir) == scheduled
+    assert ("test.post" in ttir) == scheduled
     assert ttir.count("tt.store") == 2
     assert "enzyme." not in ttir
 
@@ -369,3 +412,41 @@ def test_fwddiff_vector_add(fresh_triton_cache):
 
     torch.testing.assert_close(output, x + y)
     torch.testing.assert_close(doutput, dx + dy)
+
+
+@pytest.mark.skipif(not is_cuda(), reason="CUDA is required")
+@pytest.mark.skipif(not _has_enzyme(), reason="Enzyme-JAX is required for Triton autodiff")
+def test_reverse_autodiff_projection_hoisting(fresh_triton_cache):
+    @triton.jit
+    def cell(w, x, out, decay, steps, BLOCK: tl.constexpr):
+        idx = tl.arange(0, BLOCK)
+        weight = tl.load(w + idx)
+        feature = tl.load(x + idx)
+        state = 0.0
+        for _ in range(steps):
+            state = decay * state + tl.sum(weight * feature, axis=0)
+        tl.store(out, state)
+
+    device = triton.runtime.driver.active.get_active_torch_device()
+    w = torch.linspace(0.25, 1, 128, device=device)
+    x = torch.linspace(-0.5, 1, 128, device=device)
+    dw = torch.empty_like(w)
+    out = torch.empty(1, device=device)
+    seed = torch.empty_like(out)
+    decay, steps = 0.875, 13
+    factor = (1 - decay**steps) / (1 - decay)
+    outputs = []
+    for before in [None, "loop-invariant-code-motion", None]:
+        dw.zero_()
+        seed.fill_(-0.5)
+        compiled = autodiff(cell, pre_ad=before, post_ad="cse")[(1,)](
+            Duplicated(w, dw), Const(x), Duplicated(out, seed), Const(decay), Const(steps), BLOCK=128)
+        torch.testing.assert_close(dw, -0.5 * factor * x)
+        torch.testing.assert_close(out, (torch.dot(w, x) * factor).reshape(1))
+        torch.testing.assert_close(seed, torch.zeros_like(seed))
+        outputs.append(compiled)
+    assert outputs[0] is outputs[2]
+    assert outputs[0].hash != outputs[1].hash
+    loops = [[line for line in kernel.asm["ttir"].splitlines() if "scf.for " in line] for kernel in outputs]
+    assert "tensor<128xf32>" in loops[0][-1]
+    assert "tensor<128xf32>" not in loops[1][-1]
