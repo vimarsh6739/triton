@@ -1,0 +1,73 @@
+# Experiments in differentiating Triton IR
+
+**Current review** · [the ordinary-store pullback](https://github.com/vimarsh6739/Enzyme-JAX/pull/4/files). The [review log](session.org) records the decision and affected branches.
+
+The recurrent projection has one feature vector shared by every timestep. Moving the projection before reverse AD changes what the backward loop carries. The unhoisted derivative accumulates a feature vector on every iteration. The hoisted derivative accumulates a scalar, then scales the features once. The work on feature lanes drops from O(TD) to O(T+D). With 2,048 features and 128 steps, the median fell from 17.66 to 6.65 µs. With 8,192 features and four steps, the medians were 73.84 and 74.88 µs. [Transform schedule and reproduction](https://github.com/vimarsh6739/Enzyme-JAX/pull/3) · [Timing figure](results/recurrent-projection.png)
+
+Attention shows a different consequence of pass placement. On the same rolled causal kernel, reverse AD introduces a loop tape that the pinned Triton compiler cannot lower. A pre-AD Transform schedule unrolls the bounded key loop, letting one generated launch compute the output and Q/K/V gradients. At 113 tokens, two seeds gave 22.74–22.76 µs versus 24.79–24.81 µs for PyTorch Flash SDPA forward and backward. In the length sweep, the source-unrolled kernel took 128.71 µs versus Flash's 39.12 µs at 257 tokens. The original descriptor tutorial also passed FP64 checks at bounded shapes. Its causal case required specializing the query block and used two launches at length 128. [Attention schedule, comparisons and limits](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-attention/benchmark/results/attention-sm120/README.md)
+
+There are two direct checks on the choice of IR. Lowering the same projection first produced seven NVVM shuffle calls unsupported by the pinned LLVM Enzyme build. Lowering the AdamW primal first produced a predicated inline PTX load that blocked its LLVM JVP. Both differentiated at TTIR. The corresponding LLVM scalar and typed-load controls passed. Earlier work also differentiated at TTIR. The coverage audit replays three of its archived backward kernels on this backend and records where the outputs agreed. [Projection control](https://github.com/vimarsh6739/Enzyme-JAX/blob/vim/ttir-ad-schedules/scripts/results/ttir-recurrence-rtx5090/README.md) · [AdamW control](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-mlbench/benchmark/llvm-ad/README.md) · [Coverage and prior implementation](results/tutorial-coverage/README.md)
+
+The same schedule also ran inside a classifier on the official UCI Optical Digits split. The model reads eight different pixel rows, with image-wide context reused at each step. It reached 85.98% test accuracy. Both generated context gradients agreed with FP64 autograd within 9.5e-7 relative L2. The hoisted kernel used seven fewer native multiplies. At eight steps the two latency medians were identical at 16.256 µs. [Digit recurrence and raw measurements](https://github.com/vimarsh6739/Enzyme-JAX/blob/vim/ttir-ad-schedules/scripts/results/ttir-digit-recurrence-rtx5090/README.md)
+
+For the code-simplification example, open the AdamW kernels side by side. The generated path maintains a six-line update and an eight-line primal kernel body. The matched handwritten controls also require a 17-line JVP, an 18-line VJP and a four-line accumulation helper. These are counts of nonblank, non-comment body lines in this implementation. Both routes compute the updated optimizer state and support nonzero initial adjoints. [AdamW kernels](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-mlbench/benchmark/adamw.py)
+
+## Code that the kernel author maintains
+
+HDRNet’s learned bilateral color transform is the three-way comparison. The same photograph, coefficient grid and guide run through compiled PyTorch, handwritten CUDA and Triton with a generated pullback. At 4.19 MP, compiled PyTorch takes 18.09 ms in 21 lines, tuned CUDA takes 3.63 ms in 147 lines and Triton AD takes 4.10 ms in 73 lines. At 1.05 MP the generated path is fastest at 0.74 ms. Each time includes the output and all three input gradients. The draft has the learned checkpoint, original 2017 CUDA control, profiled launches, an FP64 probe for three bad guide gradients and the complete counted listings. [Figure](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-bilateral/benchmark/bilateral/results/bilateral.png) · [Raw timings and source](https://github.com/vimarsh6739/triton/tree/vim/ttir-ad-bilateral/benchmark/bilateral)
+
+The earlier comparison covers a MovieLens loss, two AdamW derivative modes and GroupNorm. MovieLens uses 29 lines with AD and 39 by hand at similar GPU time. [Supplementary source comparisons](https://github.com/vimarsh6739/triton/pull/19)
+
+## Downstream kernel measurements
+
+All three rows time BF16 forward and backward in a CUDA graph on RTX 5090 hardware. The model checks and eager measurements have separate scopes.
+
+| Kernel and workload | Upstream | Generated | What changed |
+| --- | ---: | ---: | --- |
+| Liger SwiGLU, 3,072 × 12,288 | 389.12 µs | 389.12 µs | The combined baseline took 807–811 µs. The specialized backward reads the seed and writes two fresh gradients. Explicit input donation further reduces backward allocation from 144 MiB to zero. [Memory and sigmoid ablations](https://github.com/vimarsh6739/triton/pull/17) · [Native pass](https://github.com/vimarsh6739/Enzyme-JAX/pull/6) |
+| Liger GroupNorm, (2, 4096, 512) | 28.10–28.13 µs | 19.84–19.94 µs | One group fits in a tile. Enzyme differentiates its arithmetic and the wrapper writes each input gradient once. The hand-tiled control takes 18.08–18.14 µs. [Graph and eager measurements](https://github.com/vimarsh6739/triton/pull/16) |
+| FLA Q/K normalization, 16 heads of width 128 | 4.760 / 19.516 µs | 3.524 / 22.788 µs | At 128 / 2,048 tokens, the paired derivative reuses FLA's saved output and reciprocal norm. The paired handwritten code is fastest at 128 tokens. The full KDA operator was checked for agreement at two lengths. [Benchmark and integration](https://github.com/vimarsh6739/triton/pull/18) |
+
+## Branches to review
+
+Each link opens a draft on a personal fork. The Triton branches start at the existing AD frontend. The Enzyme-JAX branches start at `vim/tritonrev`. The LLVM Poseidon experiment stacks on the TTIR port of Enzyme PR 3703.
+
+| Draft | What to inspect |
+| --- | --- |
+| [Triton frontend](https://github.com/vimarsh6739/triton/pull/11) | Pass a Transform library or a native pass pipeline before or after either AD mode. Schedule contents, placement and the imported compiler binary participate in the compilation cache. |
+| [Enzyme-JAX Python pass registration](https://github.com/vimarsh6739/Enzyme-JAX/pull/5) | Make the native TTIR passes available to the Python extension. This lets a Transform schedule invoke the same loop unroller as the standalone optimizer. |
+| [Recurrent projection](https://github.com/vimarsh6739/Enzyme-JAX/pull/3) | Four schedule orders, 720 latency samples, the FP64 reference and the matched NVVM control. |
+| [Proofs](https://github.com/vimarsh6739/Enzyme-JAX/pull/2) | Lean checks the per-lane identity for any number of steps under distributivity. Perfify checks 32 versus one logical splat in the emitted 32-step TTIR. Z3 checks a one-ULP binary32 counterexample to bitwise equivalence. |
+| [Softmax pass](https://github.com/vimarsh6739/Enzyme-JAX/pull/1) | Detaching the shared maximum before differentiating gives three reductions in both JVP and VJP. The baseline and applying the pass after AD give five. |
+| [Reverse seed synchronization](https://github.com/vimarsh6739/Enzyme-JAX/pull/4) | Multiple warps can read a replicated output cotangent while another warp clears it. An eight-warp generated pullback failed 88/100 launches before the fix and 0/100 afterward. The minimized Triton kernel also failed without AD. |
+| [AdamW and example reweighting](https://github.com/vimarsh6739/triton/pull/10) | The same primal produces full and activity-specialized derivatives. At 4.19M elements, generating only the requested adjoint reduced four atomics to one and time from 372.74 to 194.56 µs. The best full generated VJP took 262.14 µs versus 221.18 µs by hand. On digits, the generated one-step validation hypergradient agreed with FP64 within 2.75e-7 relative L2 on five splits. |
+| [Sparse tensor factorization](https://github.com/vimarsh6739/triton/pull/12) | Differentiate squared and Huber losses from one sampled CP kernel. At rank 64 and 65,539 uniformly sampled entries the four-warp squared-loss medians were both 26.62 µs. Training a rank-16 user × item × week model on MovieLens 100K gave test RMSE 1.0503–1.0680 across three seeds. The training-mean baseline gave 1.1537. |
+| [Reverse attention](https://github.com/vimarsh6739/triton/pull/13) | A bounded online-softmax kernel produces Q, K and V gradients from one primal. Static unrolling before AD avoids a tape that the rolled derivative cannot lower. At batch 2, eight heads and head width 64, length 113 took 22.97 µs versus 24.76 µs with PyTorch Flash SDPA forward and backward. At length 257 the generated kernel took 128.71 µs versus 39.12 µs. Both were checked against FP64. |
+| [Numerically stable softmax seeds](https://github.com/vimarsh6739/triton/pull/14) | Center the incoming seed within a fused derivative. With a large common offset all four reverse kernels met a 1e-5 maximum-error budget on held-out inputs. A near-zero-probability first lane with an outlying seed made first-lane centering much less accurate. |
+| [TTIR Poseidon port](https://github.com/vimarsh6739/Enzyme/pull/1) | Tune the primal, JVP, both or neither. On x/(1+x), JVP tuning removed 20 false zeros. Adding primal tuning yielded 14 false zeros in the second derivative. The archive includes all 6,144 observed values and Herbie's expressions. |
+| [LLVM Poseidon profiling](https://github.com/vimarsh6739/Enzyme/pull/2) | Instrument both a squared-distance margin and its generated JVP on CUDA. At target 10⁻¹⁷ the solver chose a cheaper expression exact on all 32 held-out inputs. At 10⁻¹² it dropped a constant, producing a worst observed primal relative error of 26.7%. Both JVPs stayed exact on these inputs. |
+
+## Which softmax schedule transfers?
+
+The search tries two compiler pipelines and one, four or eight warps. It checks the generated kernel against FP64 before timing it. A calibration on 512 rows selects a schedule for each row width and AD mode. A 2,048-row sweep measures all candidates again. A separate process reads the saved choices and runs only those kernels on 1,025 rows. Replay checks the target, compiler hashes, benchmark and calibration settings. The second sweep uses the synchronized seed-read compiler. It passed all 768 nominal checks. [Calibration, holdout, cache and replay](results/synchronized)
+
+At fixed four warps and width 127, moving the pass before AD reduced forward time from 3.316 to 2.544 µs and reverse time from 3.548 to 3.032 µs on the 2,048-row holdout. Width 4,096 was near even. Selecting the fastest nominal candidate across pipelines and warp counts on calibration could leave up to 34% overhead on the holdout. [Runtime and error figure](results/synchronized/softmax-shift.png)
+
+A directional seed with a common offset of 65,536 changes the choice. At width 127 the detached four-warp JVP's held-out maximum absolute error was 2.56e-3 versus 6.04e-8 for baseline. Requiring at most 1e-5 on this seed in calibration kept the baseline JVP at all four widths and rejected every reverse candidate. The table uses the recorded runs for both policies and leaves the choice empty when no candidate qualifies. The real-arithmetic quotient identity can be checked separately with Z3. [Policy table](results/synchronized/policy.csv) · [Policy comparison](cache_policy.py) · [Identity](softmax_shift.smt2)
+
+That rejection led to a new schedule. The softmax Jacobian annihilates the constant vector, so the incoming seed can be centered inside the fused derivative. The first-lane anchor brought VJP error below 1e-7 on the common-offset holdout at every width. A large seed in a nearly zero-probability first lane exposed an error of 0.184. Switching to the maximum-logit lane reduced it to 2.98e-8 at width 127. When the high-probability lane itself carried the extreme seed, the new pivot exceeded 1e-5 at widths 512, 1,023 and 4,096. The study includes the two candidate schedules, ordinary and adversarial inputs, cache replays and timing costs. [Seed-centering experiments](https://github.com/vimarsh6739/triton/blob/vim/ttir-ad-softmax-centering/benchmark/study/centered/README.md)
+
+## Reproduce the figures
+
+Use the Triton AD frontend, a Triton-enabled Enzyme-JAX optimizer with the softmax and seed-read commits, matching ptxas and CUDA PyTorch. The recorded versions and binary hashes are in the calibration file. Commands below run from this directory. The per-draft READMEs give the commands for their application, oracle and figure.
+
+```sh
+python softmax.py --opt "$ENZYME_OPT" --output run
+python softmax.py --opt "$ENZYME_OPT" --output replay --holdout-rows 1025 --replay run/cache.json
+python cache_policy.py run/timings.csv policy.csv
+python plot.py --softmax run/timings.csv --recurrence "$RECURRENCE_TIMINGS" --output figures
+python scheduled_softmax.py
+python tasks.py --dot | dot -Tsvg -o graph.svg
+```
+
+GPU timings throughout the study are from RTX 5090 hardware. Six differentiated TTIR modules also compiled to device binaries for sm80, sm90, sm120, gfx90a and gfx942. With both Triton backends installed and `llvm-readobj` on PATH, run `python cross_compile.py results/cross-compile-inputs/*.ttir --output cross`. Recompiling from a new directory reproduced all 30 native code hashes. Debug paths changed 25 full binary hashes. A performance comparison across architectures requires measurements on those devices. [Compiled binaries](results/binaries.csv) · [Archived TTIR](results/cross-compile-inputs) · [Task graph](results/tasks.svg) · [Running log](session.org)

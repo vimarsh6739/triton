@@ -1,0 +1,50 @@
+01-vector-add
+=== vector_add ===
+  TTIR: @fwddiffeadd_kernel, 3232 bytes
+  primal: max_abs=0
+  tangent: max_abs=0
+PASS vector_add (0.71s)
+
+02-fused-softmax
+=== softmax ===
+  TTIR: @fwddiffesoftmax_kernel, 6137 bytes
+  primal: max_abs=3.72529e-09
+  tangent: max_abs=5.58794e-09
+PASS softmax (0.78s)
+
+03-matrix-multiplication
+=== matmul ===
+  TTIR: @fwddiffematmul_kernel, 12195 bytes
+  primal: max_abs=9.53674e-07
+  tangent: max_abs=4.76837e-07
+PASS matmul (0.84s)
+
+04-low-memory-dropout
+=== dropout ===
+python/triton/language/semantic.py:1762: UserWarning: tl.where with a non-boolean condition is deprecated and will error out in a future triton release. Got int32
+  warnings.warn(
+  TTIR: @fwddiffe_dropout, 3642 bytes
+  mask primal: max_abs=0
+  mask tangent: max_abs=0
+  TTIR: @fwddiffe_seeded_dropout, 15463 bytes
+  seeded primal: max_abs=0
+  seeded tangent: max_abs=0
+PASS dropout (0.89s)
+
+05-layer-norm
+=== layer_norm ===
+  TTIR: @fwddiffe_layer_norm_fwd_fused, 12941 bytes
+  primal: max_abs=4.76837e-07
+  tangent: max_abs=5.96046e-08
+  mean primal: max_abs=2.23517e-08
+  mean tangent: max_abs=1.86265e-09
+  rstd primal: max_abs=1.19209e-07
+  rstd tangent: max_abs=5.58794e-09
+PASS layer_norm (0.88s)
+
+06-fused-attention
+=== attention ===
+  TTIR: @fwddiffe_attn_fwd, 15551 bytes
+  primal: max_abs=3.05176e-05
+  tangent: max_abs=3.05176e-05
+PASS attention (1.32s)
